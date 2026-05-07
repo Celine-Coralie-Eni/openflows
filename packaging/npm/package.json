@@ -1,6 +1,6 @@
 {
   "name": "@the-agenticflow/openflows",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Autonomous AI development team — turns GitHub issues into working PRs",
   "main": "index.js",
   "bin": {
@@ -29,6 +29,11 @@
     "url": "https://github.com/The-AgenticFlow/AgentFlow/issues"
   },
   "homepage": "https://openflows.dev",
+  "files": [
+    "bin/",
+    "scripts/",
+    "README.md"
+  ],
   "engines": {
     "node": ">=18.0.0"
   },

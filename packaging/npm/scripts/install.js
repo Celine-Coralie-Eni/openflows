@@ -101,27 +101,55 @@ async function main() {
         fs.mkdirSync(BIN_DIR, { recursive: true });
     }
 
-    // Get latest release tag
-    const tag = await new Promise((resolve, reject) => {
-        https.get(`https://api.github.com/repos/${REPO}/releases/latest`, {
-            headers: { 'User-Agent': 'openflows-npm-installer' }
-        }, (res) => {
-            let data = '';
-            res.on('data', (chunk) => data += chunk);
-            res.on('end', () => {
-                try {
-                    const json = JSON.parse(data);
-                    resolve(json.tag_name);
-                } catch {
-                    reject(new Error('Failed to parse release info'));
+    // Get latest release tag with better error handling
+    let tag;
+    try {
+        tag = await new Promise((resolve, reject) => {
+            const req = https.get(`https://api.github.com/repos/${REPO}/releases/latest`, {
+                headers: { 
+                    'User-Agent': 'openflows-npm-installer',
+                    'Accept': 'application/vnd.github.v3+json'
                 }
+            }, (res) => {
+                if (res.statusCode !== 200) {
+                    reject(new Error(`GitHub API returned ${res.statusCode}`));
+                    return;
+                }
+                let data = '';
+                res.on('data', (chunk) => data += chunk);
+                res.on('end', () => {
+                    try {
+                        const json = JSON.parse(data);
+                        if (!json.tag_name) {
+                            reject(new Error('No tag_name in release response'));
+                        } else {
+                            resolve(json.tag_name);
+                        }
+                    } catch (parseErr) {
+                        reject(new Error(`Failed to parse release info: ${parseErr.message}`));
+                    }
+                });
             });
-        }).on('error', reject);
-    });
+            req.on('error', reject);
+            req.setTimeout(30000, () => {
+                req.destroy();
+                reject(new Error('GitHub API request timeout'));
+            });
+        });
+    } catch (apiErr) {
+        console.error(`[@the-agenticflow/openflows] GitHub API error: ${apiErr.message}`);
+        console.error('[@the-agenticflow/openflows] Falling back to latest known version: v0.1.3');
+        tag = 'v0.1.3';
+    }
 
     const archiveName = `openflows-${tag}-${platform}.tar.gz`;
     const downloadUrl = `https://github.com/${REPO}/releases/download/${tag}/${archiveName}`;
-    const tmpFile = path.join(os.tmpdir(), archiveName);
+    // Use package's temp directory instead of system /tmp to avoid permission issues
+    const tmpDir = path.join(__dirname, '..', '.tmp');
+    if (!fs.existsSync(tmpDir)) {
+        fs.mkdirSync(tmpDir, { recursive: true });
+    }
+    const tmpFile = path.join(tmpDir, archiveName);
 
     try {
         await download(downloadUrl, tmpFile);
@@ -131,7 +159,7 @@ async function main() {
         if (platform === 'x86_64-unknown-linux-gnu') {
             const muslArchiveName = `openflows-${tag}-x86_64-unknown-linux-musl.tar.gz`;
             const muslDownloadUrl = `https://github.com/${REPO}/releases/download/${tag}/${muslArchiveName}`;
-            const muslTmpFile = path.join(os.tmpdir(), muslArchiveName);
+            const muslTmpFile = path.join(tmpDir, muslArchiveName);
             console.log(`[@the-agenticflow/openflows] Trying musl fallback...`);
             await download(muslDownloadUrl, muslTmpFile);
             await extractTarGz(muslTmpFile, BIN_DIR);
@@ -154,6 +182,14 @@ async function main() {
 
     if (fs.existsSync(tmpFile)) {
         fs.unlinkSync(tmpFile);
+    }
+    // Clean up temp directory if empty
+    try {
+        if (fs.existsSync(tmpDir) && fs.readdirSync(tmpDir).length === 0) {
+            fs.rmdirSync(tmpDir);
+        }
+    } catch (cleanupErr) {
+        // Ignore cleanup errors
     }
     console.log(`[openflows] Installation complete!`);
 }
