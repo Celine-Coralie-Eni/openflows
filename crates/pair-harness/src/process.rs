@@ -155,6 +155,21 @@ impl ProcessManager {
         }
     }
 
+    /// Inject Fireworks Anthropic-compatible endpoint for CLI agents.
+    /// Fireworks offers an Anthropic-compatible API at /inference/v1
+    /// which allows Claude CLI to work with Fireworks models.
+    fn inject_fireworks_anthropic_env(cmd: &mut Command) {
+        let base_url = std::env::var("FIREWORKS_API_URL")
+            .unwrap_or_else(|_| "https://api.fireworks.ai/inference/v1".to_string());
+        let base_url = base_url.trim_end_matches('/').trim_end_matches("/chat/completions").trim_end_matches('/').to_string();
+        
+        cmd.env("ANTHROPIC_BASE_URL", base_url);
+        
+        if let Ok(api_key) = std::env::var("FIREWORKS_API_KEY") {
+            cmd.env("ANTHROPIC_API_KEY", api_key);
+        }
+    }
+
     fn inject_llm_env(cmd: &mut Command) {
         cmd.env(
             "LLM_PROVIDER",
@@ -367,6 +382,10 @@ impl ProcessManager {
                 proxy_url,
                 self.proxy_api_key.as_deref(),
             );
+        } else if std::env::var("FIREWORKS_API_KEY").is_ok() {
+            // Use Fireworks Anthropic-compatible endpoint for Claude CLI compatibility
+            Self::inject_fireworks_anthropic_env(&mut cmd);
+            Self::inject_llm_env(&mut cmd);
         } else {
             cmd.env(
                 "ANTHROPIC_API_KEY",
@@ -492,10 +511,14 @@ impl ProcessManager {
         if let Some(proxy_url) = &self.proxy_url {
             Self::inject_proxy_env(
                 &mut cmd,
-                "sentinel-key",
+                "forge-key",
                 proxy_url,
                 self.proxy_api_key.as_deref(),
             );
+        } else if std::env::var("FIREWORKS_API_KEY").is_ok() {
+            // Use Fireworks Anthropic-compatible endpoint for Claude CLI compatibility
+            Self::inject_fireworks_anthropic_env(&mut cmd);
+            Self::inject_llm_env(&mut cmd);
         } else {
             cmd.env(
                 "ANTHROPIC_API_KEY",

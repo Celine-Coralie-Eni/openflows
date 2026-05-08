@@ -20,7 +20,11 @@ async fn main() -> Result<()> {
         Err(dotenvy::Error::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => {}
         Err(err) => return Err(err.into()),
     }
-    tracing_subscriber::fmt::init();
+    // Initialize logging with INFO level by default (can override via RUST_LOG env var)
+    let log_filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new(&log_filter))
+        .init();
 
     info!("Starting REAL End-to-End Orchestration (Event-Driven FORGE-SENTINEL Pairs + VESSEL)");
 

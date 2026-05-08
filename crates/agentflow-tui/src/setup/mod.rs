@@ -47,6 +47,7 @@ pub struct SetupConfig {
     pub gemini_key: Option<String>,
     pub openai_key: Option<String>,
     pub fireworks_key: Option<String>,
+    pub fireworks_api_format: String, // "anthropic" (default) or "openai"
     pub repo: String,
     pub workspace_dir: String,
     pub proxy_enabled: bool,
@@ -71,6 +72,7 @@ impl Default for SetupConfig {
             gemini_key: None,
             openai_key: None,
             fireworks_key: None,
+            fireworks_api_format: "anthropic".to_string(), // Default to Anthropic compatibility
             repo: "owner/repo".to_string(),
             workspace_dir: format!("{}/.agentflow/workspaces", home),
             proxy_enabled: false,
@@ -146,7 +148,7 @@ async fn run_wizard_inner(mut terminal: Terminal<CrosstermBackend<io::Stdout>>) 
     provider_step.render(&mut terminal, &theme, &mut config).await?;
 
     // Step 6: LLM API Key Input (based on selected provider)
-    let api_step = ApiStep::new();
+    let mut api_step = ApiStep::new();
     api_step.render(&mut terminal, &theme, &mut config).await?;
 
     // Step 7: Agent Configuration (instances, model backend filtered by provider)
@@ -201,6 +203,8 @@ pub fn write_env_file(config: &SetupConfig, project_dir: &std::path::Path) -> Re
     }
     if let Some(ref key) = config.fireworks_key {
         content.push_str(&format!("FIREWORKS_API_KEY={}\n", key));
+        // Write API format for Fireworks (anthropic or openai compatibility)
+        content.push_str(&format!("FIREWORKS_API_FORMAT={}\n", config.fireworks_api_format));
     }
 
     if config.proxy_enabled {
@@ -222,7 +226,7 @@ pub fn write_env_file(config: &SetupConfig, project_dir: &std::path::Path) -> Re
         "AGENTFLOW_WORKSPACE_ROOT={}\n",
         config.workspace_dir
     ));
-    content.push_str("RUST_LOG=info,agent_team=debug,pocketflow_core=debug\n");
+    content.push_str("RUST_LOG=info\n");
 
     std::fs::write(project_dir.join(".env"), content)?;
     Ok(())

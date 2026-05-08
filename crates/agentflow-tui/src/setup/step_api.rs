@@ -11,7 +11,9 @@ use tui_input::Input;
 use crate::setup::SetupConfig;
 use crate::util::theme::Theme;
 use crate::widgets::input::InputWidget;
+use crate::widgets::select::SelectableListState;
 
+#[derive(Clone)]
 struct ApiField {
     label: String,
     env_key: String,
@@ -19,15 +21,49 @@ struct ApiField {
     required: bool,
 }
 
-pub struct ApiStep;
+/// API format options for Fireworks
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FireworksApiFormat {
+    Anthropic,
+    OpenAi,
+}
+
+impl FireworksApiFormat {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic",
+            Self::OpenAi => "openai",
+        }
+    }
+
+    fn display_name(&self) -> &'static str {
+        match self {
+            Self::Anthropic => "Anthropic (Claude-compatible)",
+            Self::OpenAi => "OpenAI (OpenAI-compatible)",
+        }
+    }
+
+    fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "openai" | "open_ai" => Self::OpenAi,
+            _ => Self::Anthropic,
+        }
+    }
+}
+
+pub struct ApiStep {
+    fireworks_format: FireworksApiFormat,
+}
 
 impl ApiStep {
     pub fn new() -> Self {
-        Self
+        Self {
+            fireworks_format: FireworksApiFormat::Anthropic,
+        }
     }
 
     pub async fn render(
-        &self,
+        &mut self,
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
         theme: &Theme,
         config: &mut SetupConfig,
@@ -55,12 +91,27 @@ impl ApiStep {
                 input: Input::new(config.gemini_key.clone().unwrap_or_default()),
                 required: true,
             }),
-            "Fireworks AI" => Some(ApiField {
-                label: "Fireworks API Key".to_string(),
-                env_key: "FIREWORKS_API_KEY".to_string(),
-                input: Input::new(config.fireworks_key.clone().unwrap_or_default()),
-                required: true,
-            }),
+            "Fireworks AI" => {
+                // First, collect API key
+                let key_fields = vec![
+                    ApiField {
+                        label: "Fireworks API Key".to_string(),
+                        env_key: "FIREWORKS_API_KEY".to_string(),
+                        input: Input::new(config.fireworks_key.clone().unwrap_or_default()),
+                        required: true,
+                    },
+                ];
+                
+                // Render key input first
+                self.render_fields(terminal, theme, config, key_fields, &provider_name, false).await?;
+                
+                // Now render format selector
+                let format_selected = self.render_format_selector(terminal, theme, &provider_name).await?;
+                self.fireworks_format = format_selected;
+                config.fireworks_api_format = format_selected.as_str().to_string();
+                
+                return Ok(());
+            }
             "LiteLLM Proxy" => {
                 let mut proxy_fields = Vec::new();
                 proxy_fields.push(ApiField {
@@ -75,7 +126,7 @@ impl ApiStep {
                     input: Input::new(std::env::var("LITELLM_API_KEY").unwrap_or_default()),
                     required: false,
                 });
-                return self.render_fields(terminal, theme, config, proxy_fields, &provider_name).await;
+                return self.render_fields(terminal, theme, config, proxy_fields, &provider_name, false).await;
             }
             "Ollama (Local)" => Some(ApiField {
                 label: "Ollama Host URL".to_string(),
@@ -95,7 +146,93 @@ impl ApiStep {
             return Ok(());
         }
 
-        self.render_fields(terminal, theme, config, fields, &provider_name).await
+        self.render_fields(terminal, theme, config, fields, &provider_name, false).await
+    }
+
+    async fn render_format_selector(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        theme: &Theme,
+        _provider_name: &str,
+    ) -> Result<FireworksApiFormat> {
+        let formats = [FireworksApiFormat::Anthropic, FireworksApiFormat::OpenAi];
+        let format_names: Vec<String> = formats.iter().map(|f| f.display_name().to_string()).collect();
+        let mut list_state = SelectableListState::new(format_names.clone());
+        list_state.selected = 0;
+
+        loop {
+            terminal.draw(|f| {
+                let area = f.area();
+
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .margin(3)
+                    .constraints([
+                        Constraint::Length(6),
+                        Constraint::Min(4),
+                        Constraint::Length(2),
+                    ])
+                    .split(area);
+
+                let title_block = ratatui::widgets::Block::default()
+                    .borders(ratatui::widgets::Borders::BOTTOM)
+                    .border_style(Style::default().fg(theme.border()));
+
+                let inner_title = title_block.inner(chunks[0]);
+                title_block.render(chunks[0], f.buffer_mut());
+
+                let title = Line::styled(
+                    "◇ FIREWORKS API FORMAT",
+                    Style::default()
+                        .fg(theme.accent_alt())
+                        .add_modifier(Modifier::BOLD),
+                );
+                let subtitle = Line::styled(
+                    "  Choose API compatibility mode",
+                    Style::default().fg(theme.muted()),
+                );
+                let description = Line::styled(
+                    "  Anthropic = Claude-compatible | OpenAI = OpenAI-compatible",
+                    Style::default().fg(theme.muted()),
+                );
+                let title_para = ratatui::widgets::Paragraph::new(vec![title, subtitle, description]);
+                title_para.render(inner_title, f.buffer_mut());
+
+                let list_widget = crate::widgets::select::SelectableList::new(
+                    &list_state.items,
+                    list_state.selected,
+                );
+
+                list_widget.render(chunks[1], f.buffer_mut());
+
+                let help = "  ↑/↓: navigate  │  Enter: select  │  Esc: cancel";
+                let help_line = Line::styled(help, Style::default().fg(theme.muted()));
+                let help_para = Paragraph::new(help_line);
+                help_para.render(chunks[2], f.buffer_mut());
+            })?;
+
+            if crossterm::event::poll(std::time::Duration::from_millis(100))? {
+                if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
+                    use crossterm::event::KeyCode;
+                    match key.code {
+                        KeyCode::Up => {
+                            list_state.move_up();
+                        }
+                        KeyCode::Down => {
+                            list_state.move_down();
+                        }
+                        KeyCode::Enter => {
+                            let idx = list_state.selected;
+                            return Ok(formats[idx]);
+                        }
+                        KeyCode::Esc => {
+                            return Err(anyhow::anyhow!("Setup cancelled"));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
     }
 
     async fn render_fields(
@@ -105,6 +242,7 @@ impl ApiStep {
         config: &mut SetupConfig,
         mut fields: Vec<ApiField>,
         provider_name: &str,
+        _show_format: bool,
     ) -> Result<()> {
         let total_fields = fields.len();
         let mut focused_field: usize = 0;
