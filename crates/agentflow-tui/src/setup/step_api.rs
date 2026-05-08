@@ -92,7 +92,7 @@ impl ApiStep {
                 required: true,
             }),
             "Fireworks AI" => {
-                // First, collect API key
+                // Fireworks only supports OpenAI format (no native Anthropic endpoint)
                 let key_fields = vec![
                     ApiField {
                         label: "Fireworks API Key".to_string(),
@@ -102,15 +102,9 @@ impl ApiStep {
                     },
                 ];
                 
-                // Render key input first
-                self.render_fields(terminal, theme, config, key_fields, &provider_name, false).await?;
-                
-                // Now render format selector
-                let format_selected = self.render_format_selector(terminal, theme, &provider_name).await?;
-                self.fireworks_format = format_selected;
-                config.fireworks_api_format = format_selected.as_str().to_string();
-                
-                return Ok(());
+                // Render key input (no format selector needed)
+                config.fireworks_api_format = "openai".to_string();
+                return self.render_fields(terminal, theme, config, key_fields, &provider_name, false).await;
             }
             "LiteLLM Proxy" => {
                 let mut proxy_fields = Vec::new();

@@ -34,8 +34,10 @@ const MODELS_GROQ: &[&str] = &[
 ];
 
 const MODELS_FIREWORKS: &[&str] = &[
-    "fireworks/accounts/fireworks/models/llama-v3p1-8b-instruct",
-    "fireworks/accounts/fireworks/models/glm-5",
+    "accounts/fireworks/models/llama-v3p1-8b-instruct",
+    "accounts/fireworks/models/glm-5",
+    "accounts/fireworks/models/kimi-k2p5",
+    "accounts/fireworks/models/qwen3-235b-a22b",
 ];
 
 const MODELS_ALL: &[&str] = &[

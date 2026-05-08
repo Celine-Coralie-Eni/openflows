@@ -991,10 +991,14 @@ impl ForgeSentinelPair {
                                 *forge = self.spawn_forge_resume().await?;
                                 self.reset.increment_reset();
                             } else {
-                                info!("FORGE exited with partial worklog - respawning to continue implementation");
+                                let new_count = self.reset.increment_reset();
+                                info!(
+                                    reset_count = new_count,
+                                    max_resets = self.config.max_resets,
+                                    "FORGE exited with partial worklog - respawning to continue implementation"
+                                );
                                 self.sentinel_retries.reset_all();
                                 *forge = self.spawn_forge_resume().await?;
-                                self.reset.increment_reset();
                             }
                         } else {
                             info!("FORGE exited after making progress - respawning to continue");

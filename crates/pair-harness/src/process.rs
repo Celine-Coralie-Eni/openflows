@@ -155,9 +155,10 @@ impl ProcessManager {
         }
     }
 
-    /// Inject Fireworks Anthropic-compatible endpoint for CLI agents.
-    /// Fireworks offers an Anthropic-compatible API at /inference/v1
-    /// which allows Claude CLI to work with Fireworks models.
+    /// Inject Fireworks configuration for CLI agents.
+    /// NOTE: Fireworks doesn't have a native Anthropic endpoint, so Claude CLI
+    /// requires a proxy. This function is kept for potential future use if
+    /// Fireworks adds Anthropic support, but currently should not be called.
     fn inject_fireworks_anthropic_env(cmd: &mut Command) {
         let base_url = std::env::var("FIREWORKS_API_URL")
             .unwrap_or_else(|_| "https://api.fireworks.ai/inference/v1".to_string());
@@ -382,15 +383,25 @@ impl ProcessManager {
                 proxy_url,
                 self.proxy_api_key.as_deref(),
             );
-        } else if std::env::var("FIREWORKS_API_KEY").is_ok() {
-            // Use Fireworks Anthropic-compatible endpoint for Claude CLI compatibility
-            Self::inject_fireworks_anthropic_env(&mut cmd);
-            Self::inject_llm_env(&mut cmd);
         } else {
-            cmd.env(
-                "ANTHROPIC_API_KEY",
-                std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
-            );
+            // For Claude CLI agents, we need either a proxy or direct Anthropic API
+            // Fireworks doesn't support native Anthropic format, so proxy is required
+            if std::env::var("FIREWORKS_API_KEY").is_ok() && std::env::var("ANTHROPIC_API_KEY").is_err() {
+                tracing::warn!("Fireworks API key set but no proxy configured. Claude CLI agents require proxy for Fireworks. Attempting auto-detection...");
+                // Try to use local proxy if running
+                if let Ok(port) = std::env::var("PORT") {
+                    let proxy_url = format!("http://localhost:{}/v1", port);
+                    Self::inject_proxy_env(&mut cmd, "forge-key", &proxy_url, std::env::var("FIREWORKS_API_KEY").ok().as_deref());
+                } else {
+                    // Fall back to trying default proxy port
+                    Self::inject_proxy_env(&mut cmd, "forge-key", "http://localhost:8765/v1", std::env::var("FIREWORKS_API_KEY").ok().as_deref());
+                }
+            } else {
+                cmd.env(
+                    "ANTHROPIC_API_KEY",
+                    std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
+                );
+            }
             Self::inject_llm_env(&mut cmd);
         }
 
@@ -515,15 +526,25 @@ impl ProcessManager {
                 proxy_url,
                 self.proxy_api_key.as_deref(),
             );
-        } else if std::env::var("FIREWORKS_API_KEY").is_ok() {
-            // Use Fireworks Anthropic-compatible endpoint for Claude CLI compatibility
-            Self::inject_fireworks_anthropic_env(&mut cmd);
-            Self::inject_llm_env(&mut cmd);
         } else {
-            cmd.env(
-                "ANTHROPIC_API_KEY",
-                std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
-            );
+            // For Claude CLI agents, we need either a proxy or direct Anthropic API
+            // Fireworks doesn't support native Anthropic format, so proxy is required
+            if std::env::var("FIREWORKS_API_KEY").is_ok() && std::env::var("ANTHROPIC_API_KEY").is_err() {
+                tracing::warn!("Fireworks API key set but no proxy configured. Claude CLI agents require proxy for Fireworks. Attempting auto-detection...");
+                // Try to use local proxy if running
+                if let Ok(port) = std::env::var("PORT") {
+                    let proxy_url = format!("http://localhost:{}/v1", port);
+                    Self::inject_proxy_env(&mut cmd, "forge-key", &proxy_url, std::env::var("FIREWORKS_API_KEY").ok().as_deref());
+                } else {
+                    // Fall back to trying default proxy port
+                    Self::inject_proxy_env(&mut cmd, "forge-key", "http://localhost:8765/v1", std::env::var("FIREWORKS_API_KEY").ok().as_deref());
+                }
+            } else {
+                cmd.env(
+                    "ANTHROPIC_API_KEY",
+                    std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
+                );
+            }
             Self::inject_llm_env(&mut cmd);
         }
 

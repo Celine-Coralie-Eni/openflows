@@ -40,21 +40,21 @@ function isPortInUse(port) {
     });
 }
 
-// Check if user needs proxy (no direct API keys, but has gateway config)
+// Check if user needs proxy (for LLM API translation if needed)
 function needsProxy() {
     // If user explicitly set PROXY_URL, respect it
     if (process.env.PROXY_URL) {
         return { needed: false, reason: 'PROXY_URL already set' };
     }
     
-    // If user has Fireworks API key, they can use it directly
-    if (process.env.FIREWORKS_API_KEY) {
-        return { needed: false, reason: 'Fireworks direct mode' };
-    }
-    
     // If user has Anthropic API key, they can use it directly
     if (process.env.ANTHROPIC_API_KEY) {
         return { needed: false, reason: 'Anthropic direct mode' };
+    }
+    
+    // Fireworks users need proxy for Claude CLI agents (no native Anthropic endpoint)
+    if (process.env.FIREWORKS_API_KEY) {
+        return { needed: true, reason: 'Fireworks requires proxy for Claude CLI compatibility' };
     }
     
     // If user has Gateway config but no direct keys, they need proxy
@@ -175,15 +175,18 @@ Commands:
   openflows-dashboard Live monitoring TUI
   openflows-doctor    Diagnostic checks
 
-Environment Variables:
-  FIREWORKS_API_KEY   Use Fireworks AI directly (recommended)
-  ANTHROPIC_API_KEY   Use Anthropic directly
+ Environment Variables:
+  ANTHROPIC_API_KEY   Use Anthropic directly (no proxy needed)
+  FIREWORKS_API_KEY   Use Fireworks AI (proxy auto-starts for Claude CLI)
   GATEWAY_URL         Custom gateway URL (requires proxy)
   GATEWAY_API_KEY     Custom gateway API key
   PROXY_PORT          Port for built-in proxy (default: 8765)
 
 Examples:
-  # Quick start with Fireworks (no proxy needed)
+  # Quick start with Anthropic (no proxy needed)
+  ANTHROPIC_API_KEY=your-key openflows
+
+  # Use Fireworks (proxy auto-starts for Claude CLI agents)
   FIREWORKS_API_KEY=your-key openflows
 
   # Use custom gateway (proxy auto-starts)

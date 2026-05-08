@@ -29,8 +29,8 @@ pub enum FireworksApiFormat {
 
 impl Default for FireworksApiFormat {
     fn default() -> Self {
-        // Default to Anthropic for Claude CLI compatibility
-        Self::Anthropic
+        // Default to OpenAI since Fireworks doesn't support Anthropic endpoint directly
+        Self::OpenAi
     }
 }
 
@@ -60,22 +60,13 @@ impl FireworksClient {
         let model = std::env::var("FIREWORKS_MODEL")
             .unwrap_or_else(|_| "accounts/fireworks/models/llama-v3p1-8b-instruct".to_string());
         
-        // Determine API format from env (default to Anthropic for Claude compatibility)
-        let api_format = match std::env::var("FIREWORKS_API_FORMAT")
-            .unwrap_or_else(|_| "anthropic".to_string())
-            .to_lowercase()
-            .as_str()
-        {
-            "openai" | "open_ai" => FireworksApiFormat::OpenAi,
-            _ => FireworksApiFormat::Anthropic,
-        };
+        // Fireworks only supports OpenAI format (no native Anthropic endpoint)
+        // Default to OpenAI, ignore FIREWORKS_API_FORMAT env var
+        let api_format = FireworksApiFormat::OpenAi;
 
         // Determine API URL based on format
         let api_url = std::env::var("FIREWORKS_API_URL").unwrap_or_else(|_| {
-            match api_format {
-                FireworksApiFormat::OpenAi => FIREWORKS_OPENAI_URL.to_string(),
-                FireworksApiFormat::Anthropic => FIREWORKS_ANTHROPIC_URL.to_string(),
-            }
+            FIREWORKS_OPENAI_URL.to_string()
         });
 
         tracing::info!(
