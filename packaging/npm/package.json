@@ -1,6 +1,6 @@
 {
   "name": "@the-agenticflow/openflows",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Autonomous AI development team — turns GitHub issues into working PRs",
   "main": "index.js",
   "bin": {
@@ -14,7 +14,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/The-AgenticFlow/AgentFlow.git"
+    "url": "git+https://github.com/The-AgenticFlow/OpenFlows.git"
   },
   "keywords": [
     "ai",
@@ -29,7 +29,7 @@
   "author": "The AgenticFlow Team",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/The-AgenticFlow/AgentFlow/issues"
+    "url": "https://github.com/The-AgenticFlow/OpenFlows/issues"
   },
   "homepage": "https://openflows.dev",
   "files": [
