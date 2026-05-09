@@ -15,6 +15,44 @@ const fs = require('fs');
 const os = require('os');
 const http = require('http');
 
+// Try to load .env file before checking environment
+function loadEnvFile() {
+    const envPaths = [
+        path.join(process.cwd(), '.env'),
+        path.join(os.homedir(), '.agentflow', '.env'),
+    ];
+    
+    for (const envPath of envPaths) {
+        if (fs.existsSync(envPath)) {
+            try {
+                const content = fs.readFileSync(envPath, 'utf8');
+                content.split('\n').forEach(line => {
+                    const trimmed = line.trim();
+                    // Skip comments and empty lines
+                    if (!trimmed || trimmed.startsWith('#')) return;
+                    
+                    const eqIndex = trimmed.indexOf('=');
+                    if (eqIndex > 0) {
+                        const key = trimmed.substring(0, eqIndex).trim();
+                        const value = trimmed.substring(eqIndex + 1).trim();
+                        // Only set if not already defined
+                        if (!process.env[key]) {
+                            process.env[key] = value;
+                        }
+                    }
+                });
+                console.log(`[openflows] Loaded environment from ${envPath}`);
+                return;
+            } catch (err) {
+                // Ignore errors
+            }
+        }
+    }
+}
+
+// Load .env file early
+loadEnvFile();
+
 const binaryPath = path.join(__dirname, '..', 'bin', 'agentflow-bin');
 const PROXY_PORT = process.env.PROXY_PORT || 8765;
 const PROXY_STARTUP_TIMEOUT = 5000;
@@ -62,6 +100,12 @@ function needsProxy() {
         return { needed: true, reason: 'Gateway configured, no direct keys' };
     }
     
+    // Check if there's a .env file that might have config
+    const envPath = path.join(process.cwd(), '.env');
+    if (fs.existsSync(envPath)) {
+        return { needed: false, reason: 'No direct API key found, .env will be loaded by binary' };
+    }
+    
     // No API config at all - let the binary handle the error
     return { needed: false, reason: 'No API config - will error in binary' };
 }
@@ -83,12 +127,26 @@ async function startProxy() {
         proxyBinary = altProxy;
     }
     
+    // Build proxy environment with all necessary variables
+    const proxyEnv = {
+        ...process.env,
+        PORT: PROXY_PORT.toString(),
+        RUST_LOG: process.env.RUST_LOG || 'info'
+    };
+    
+    // Ensure gateway config is passed (for Fireworks or custom gateways)
+    if (process.env.FIREWORKS_API_KEY && !process.env.GATEWAY_URL) {
+        proxyEnv.GATEWAY_URL = 'https://api.fireworks.ai/inference/v1/';
+        proxyEnv.GATEWAY_API_KEY = process.env.FIREWORKS_API_KEY;
+        if (!process.env.MODEL_MAP) {
+            // Default model mapping for common Claude models to Fireworks
+            proxyEnv.MODEL_MAP = 'claude-haiku-4-5-20251001=accounts/fireworks/models/glm-5,claude-3-5-haiku-20241022=accounts/fireworks/models/glm-5';
+        }
+        console.log('[openflows] Configured proxy for Fireworks gateway');
+    }
+    
     const proxy = spawn(proxyBinary, [], {
-        env: {
-            ...process.env,
-            PORT: PROXY_PORT.toString(),
-            RUST_LOG: process.env.RUST_LOG || 'info'
-        },
+        env: proxyEnv,
         stdio: ['ignore', 'pipe', 'pipe']
     });
     
@@ -244,11 +302,23 @@ Documentation: https://openflows.dev
             
             if (proxyRunning) {
                 console.log(`[openflows] ✓ Proxy already running on port ${PROXY_PORT}`);
+                // Set PROXY_URL for the main binary
+                env.PROXY_URL = `http://localhost:${PROXY_PORT}/v1`;
+                if (process.env.FIREWORKS_API_KEY) {
+                    env.PROXY_API_KEY = process.env.FIREWORKS_API_KEY;
+                }
             } else {
                 proxy = await startProxy();
                 if (proxy) {
                     // Set PROXY_URL for the main binary
                     env.PROXY_URL = `http://localhost:${PROXY_PORT}/v1`;
+                    // Set PROXY_API_KEY for authentication
+                    if (process.env.FIREWORKS_API_KEY) {
+                        env.PROXY_API_KEY = process.env.FIREWORKS_API_KEY;
+                    } else if (process.env.GATEWAY_API_KEY) {
+                        env.PROXY_API_KEY = process.env.GATEWAY_API_KEY;
+                    }
+                    console.log(`[openflows] ✓ Proxy started, PROXY_URL set to ${env.PROXY_URL}`);
                 }
             }
         } else {
