@@ -53,6 +53,7 @@ pub struct SetupConfig {
     pub proxy_enabled: bool,
     pub proxy_url: Option<String>,
     pub proxy_api_key: Option<String>,
+    pub proxy_target_model: Option<String>,
     pub gateway_url: Option<String>,
     pub gateway_api_key: Option<String>,
     pub selected_provider: Option<String>,
@@ -76,8 +77,9 @@ impl Default for SetupConfig {
             repo: "owner/repo".to_string(),
             workspace_dir: format!("{}/.agentflow/workspaces", home),
             proxy_enabled: false,
-            proxy_url: Some("http://localhost:8080/v1".to_string()),
+            proxy_url: Some("http://localhost:8765/v1".to_string()),
             proxy_api_key: None,
+            proxy_target_model: None,
             gateway_url: Some("https://api.fireworks.ai/inference/v1/".to_string()),
             gateway_api_key: None,
             selected_provider: None,
@@ -163,8 +165,9 @@ async fn run_wizard_inner(mut terminal: Terminal<CrosstermBackend<io::Stdout>>) 
     let repo_step = RepoStep::new();
     repo_step.render(&mut terminal, &theme, &mut config).await?;
 
-    // Step 10: Proxy Config (advanced mode or optional)
-    if setup_mode == SetupMode::Advanced {
+    // Step 10: Proxy Config (always shown for Fireworks, otherwise advanced mode only)
+    let is_fireworks = config.selected_provider.as_deref() == Some("Fireworks AI");
+    if is_fireworks || setup_mode == SetupMode::Advanced {
         let proxy_step = ProxyStep::new();
         proxy_step
             .render(&mut terminal, &theme, &mut config)
@@ -198,8 +201,17 @@ pub fn write_env_file(config: &SetupConfig, project_dir: &std::path::Path) -> Re
             content.push_str("\n# Fireworks Gateway\n");
             content.push_str("GATEWAY_URL=https://api.fireworks.ai/inference/v1/\n");
             content.push_str(&format!("GATEWAY_API_KEY={}\n", key));
-            content.push_str("\n# Model Mapping (Anthropic model names -> Fireworks models)\n");
-            content.push_str("MODEL_MAP=claude-haiku-4-5-20251001=accounts/fireworks/models/glm-5,claude-3-5-haiku-20241022=accounts/fireworks/models/glm-5\n");
+            
+            // Write PROXY_TARGET_MODEL for dynamic model mapping
+            let target_model = config.proxy_target_model.as_deref()
+                .unwrap_or("accounts/fireworks/models/glm-5");
+            content.push_str("\n# Model Mapping: ALL Claude model names → target model\n");
+            content.push_str("# The proxy strips ANSI codes and maps claude-*, opus, sonnet, haiku → target\n");
+            content.push_str(&format!("PROXY_TARGET_MODEL={}\n", target_model));
+            
+            // Also write legacy MODEL_MAP for backward compatibility
+            let fallback_model = target_model;
+            content.push_str(&format!("MODEL_MAP=claude-haiku-4-5-20251001={fallback_model},claude-3-5-haiku-20241022={fallback_model}\n"));
         }
     } else if !config.anthropic_key.is_empty() {
         content.push_str("# Anthropic API Configuration\n");

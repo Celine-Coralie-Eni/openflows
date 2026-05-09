@@ -26,6 +26,7 @@ impl ProxyStep {
         let theme = Theme::default();
         let mut proxy_url_input = Input::new(config.proxy_url.clone().unwrap_or_default());
         let mut proxy_key_input = Input::new(config.proxy_api_key.clone().unwrap_or_default());
+        let mut target_model_input = Input::new(config.proxy_target_model.clone().unwrap_or_default());
         let mut gateway_url_input = Input::new(config.gateway_url.clone().unwrap_or_default());
         let mut gateway_key_input = Input::new(config.gateway_api_key.clone().unwrap_or_default());
         let mut focused_field = 0;
@@ -33,7 +34,7 @@ impl ProxyStep {
         loop {
             terminal.draw(|f| {
                 let area = f.area();
-                let y_start = area.height / 2 - 8;
+                let y_start = area.height / 2 - 10;
 
                 let title = Line::styled(
                     "◇ PROXY CONFIGURATION",
@@ -42,7 +43,7 @@ impl ProxyStep {
                         .add_modifier(Modifier::BOLD),
                 );
                 let subtitle = Line::styled(
-                    "  Advanced: configure LiteLLM proxy settings",
+                    "  Advanced: configure proxy and model mapping",
                     Style::default().fg(theme.muted()),
                 );
                 let title_para = ratatui::widgets::Paragraph::new(vec![title, subtitle]);
@@ -54,6 +55,7 @@ impl ProxyStep {
                 let fields = [
                     (&proxy_url_input, "Proxy URL", true),
                     (&proxy_key_input, "Proxy API Key", true),
+                    (&target_model_input, "Target Model (PROXY_TARGET_MODEL)", true),
                     (&gateway_url_input, "Gateway URL", true),
                     (&gateway_key_input, "Gateway API Key", true),
                 ];
@@ -67,7 +69,7 @@ impl ProxyStep {
                         height: 3,
                     };
                     let widget = InputWidget::new(input, label)
-                        .masked(i == 1 || i == 3)
+                        .masked(i == 1 || i == 4)
                         .focused(focused_field == i)
                         .optional(*optional);
                     widget.render(widget_area, f.buffer_mut());
@@ -79,11 +81,11 @@ impl ProxyStep {
                     use crossterm::event::KeyCode;
                     match key.code {
                         KeyCode::Tab => {
-                            focused_field = (focused_field + 1) % 4;
+                            focused_field = (focused_field + 1) % 5;
                         }
                         KeyCode::BackTab => {
                             focused_field = if focused_field == 0 {
-                                3
+                                4
                             } else {
                                 focused_field - 1
                             };
@@ -99,6 +101,11 @@ impl ProxyStep {
                                 None
                             } else {
                                 Some(proxy_key_input.value().to_string())
+                            };
+                            config.proxy_target_model = if target_model_input.value().is_empty() {
+                                None
+                            } else {
+                                Some(target_model_input.value().to_string())
                             };
                             config.gateway_url = if gateway_url_input.value().is_empty() {
                                 None
@@ -121,8 +128,9 @@ impl ProxyStep {
                             let input = match focused_field {
                                 0 => &mut proxy_url_input,
                                 1 => &mut proxy_key_input,
-                                2 => &mut gateway_url_input,
-                                3 => &mut gateway_key_input,
+                                2 => &mut target_model_input,
+                                3 => &mut gateway_url_input,
+                                4 => &mut gateway_key_input,
                                 _ => unreachable!(),
                             };
                             input.handle_event(&event);

@@ -138,9 +138,8 @@ async function startProxy() {
     if (process.env.FIREWORKS_API_KEY && !process.env.GATEWAY_URL) {
         proxyEnv.GATEWAY_URL = 'https://api.fireworks.ai/inference/v1/';
         proxyEnv.GATEWAY_API_KEY = process.env.FIREWORKS_API_KEY;
-        if (!process.env.MODEL_MAP) {
-            // Default model mapping for common Claude models to Fireworks
-            proxyEnv.MODEL_MAP = 'claude-haiku-4-5-20251001=accounts/fireworks/models/glm-5,claude-3-5-haiku-20241022=accounts/fireworks/models/glm-5';
+        if (!process.env.PROXY_TARGET_MODEL) {
+            proxyEnv.PROXY_TARGET_MODEL = 'accounts/fireworks/models/glm-5';
         }
         console.log('[openflows] Configured proxy for Fireworks gateway');
     }

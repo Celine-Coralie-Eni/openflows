@@ -23,8 +23,8 @@ That's it! The package handles everything automatically.
 
 You don't need to know about proxies, MCP servers, or backend routing. The package:
 
-1. **Installs all dependencies** - Including `mcp-proxy` for GitHub connectivity
-2. **Auto-detects your setup** - Fireworks key? Direct mode. Gateway? Proxy starts automatically
+1. **Installs all dependencies** - Including `anthropic-proxy` for LLM API translation
+2. **Auto-detects your setup** - Fireworks key? Proxy starts automatically. Anthropic key? Direct mode.
 3. **Manages the proxy lifecycle** - Starts/stops the built-in proxy as needed
 4. **Provides helpful errors** - Clear messages when something needs attention
 
@@ -32,9 +32,57 @@ You don't need to know about proxies, MCP servers, or backend routing. The packa
 
 | Mode | What You Need | Proxy Required? |
 |------|---------------|-----------------|
-| **Fireworks Direct** | `FIREWORKS_API_KEY` | No |
+| **Fireworks AI** | `FIREWORKS_API_KEY` + `PROXY_TARGET_MODEL` | Auto-started (built-in) |
 | **Anthropic Direct** | `ANTHROPIC_API_KEY` | No |
 | **Custom Gateway** | `GATEWAY_URL` + `GATEWAY_API_KEY` | Auto-started |
+
+### Fireworks AI Setup (Recommended)
+
+Fireworks AI provides cost-effective OpenAI-compatible endpoints. Since Claude Code CLI speaks the Anthropic Messages API, the package includes a built-in protocol translator that automatically starts.
+
+**Via the setup wizard:**
+
+```bash
+openflows-setup
+```
+
+When you select **Fireworks AI** as your provider, the wizard will:
+1. Ask for your `FIREWORKS_API_KEY`
+2. Show the proxy configuration screen with these fields:
+   - **Proxy URL** — pre-filled as `http://localhost:8765/v1`
+   - **Proxy API Key** — your Fireworks key (auto-filled)
+   - **Target Model (PROXY_TARGET_MODEL)** — e.g., `accounts/fireworks/models/glm-5`
+   - **Gateway URL** — pre-filled as `https://api.fireworks.ai/inference/v1/`
+   - **Gateway API Key** — your Fireworks key (auto-filled)
+3. Complete the remaining steps (agents, GitHub, repository)
+
+**What `PROXY_TARGET_MODEL` does:**
+
+Instead of manually mapping each Claude model name, set this once. The local proxy:
+1. Strips ANSI escape codes from incoming model names
+2. Detects Claude patterns (`claude-*`, `opus`, `sonnet`, `haiku`)
+3. Routes all of them to your specified target model
+
+```env
+PROXY_TARGET_MODEL=accounts/fireworks/models/glm-5
+```
+
+**Manual setup (without wizard):**
+
+```bash
+# Create .env in your project directory
+cat > .env << 'EOF'
+FIREWORKS_API_KEY=fw_your_key
+PORT=8765
+PROXY_URL=http://localhost:8765/v1
+PROXY_API_KEY=fw_your_key
+GATEWAY_URL=https://api.fireworks.ai/inference/v1/
+GATEWAY_API_KEY=fw_your_key
+PROXY_TARGET_MODEL=accounts/fireworks/models/glm-5
+GITHUB_PERSONAL_ACCESS_TOKEN=ghp_your_token
+GITHUB_REPOSITORY=owner/repo
+EOF
+```
 
 ### Commands
 
@@ -57,7 +105,7 @@ The post-install script downloads platform-specific binaries from GitHub Release
 | `agentflow-setup` | Interactive TUI setup wizard |
 | `agentflow-dashboard` | Real-time monitoring TUI |
 | `agentflow-doctor` | System diagnostics tool |
-| `anthropic-proxy` | Built-in Anthropic-to-OpenAI proxy |
+| `anthropic-proxy` | Built-in Anthropic-to-OpenAI protocol translator (auto-starts for Fireworks) |
 
 Additionally:
 - **mcp-proxy** is installed via npm for GitHub MCP connectivity
@@ -73,9 +121,10 @@ GITHUB_PERSONAL_ACCESS_TOKEN=ghp_xxxxx
 GITHUB_REPOSITORY=owner/repo-name
 
 # Choose one API provider
-FIREWORKS_API_KEY=fw_xxxxx        # Recommended - direct mode
-# ANTHROPIC_API_KEY=sk-ant-xxxx   # Direct mode
-# GATEWAY_URL=...                 # Proxy auto-starts
+FIREWORKS_API_KEY=fw_xxxxx        # Recommended — proxy auto-starts
+PROXY_TARGET_MODEL=accounts/fireworks/models/glm-5  # Target model for Fireworks
+# ANTHROPIC_API_KEY=sk-ant-xxxx   # Direct mode (no proxy needed)
+# GATEWAY_URL=...                 # Custom gateway (proxy auto-starts)
 # GATEWAY_API_KEY=...             # For custom gateways
 ```
 
@@ -112,6 +161,20 @@ openflows
 ```
 
 ## Troubleshooting
+
+### Fireworks Setup — Missing PROXY_TARGET_MODEL
+
+If you selected Fireworks AI during setup but didn't see the model configuration screen, ensure you're using version **0.1.15** or later. Earlier versions only showed proxy config in Advanced mode.
+
+```bash
+openflows --version
+# Should show 0.1.15 or later
+```
+
+If you're on an older version:
+```bash
+npm update -g @the-agenticflow/openflows
+```
 
 ### `mcp-proxy` Installation Issues
 
