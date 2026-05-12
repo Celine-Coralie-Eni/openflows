@@ -3,6 +3,7 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 ignore = ["RUSTSEC-2024-0436"]  # paste is unmaintained but not unsound; no replacement needed
 
 [licenses]
+unlicensed = "allow"
 allow = [
     "MIT",
     "Apache-2.0",
@@ -14,7 +15,6 @@ allow = [
     "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
-private = { ignore = true }
 
 [bans]
 multiple-versions = "warn"
