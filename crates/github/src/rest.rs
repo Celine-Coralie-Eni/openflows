@@ -721,6 +721,18 @@ impl GithubRestClient {
         }
     }
 
+    /// Get the authenticated user's username from the GitHub API.
+    /// Uses the /user endpoint to fetch the login name of the token owner.
+    pub async fn get_authenticated_user(&self) -> Result<String> {
+        let url = format!("{}/user", GITHUB_API_BASE);
+        let resp: serde_json::Value = self.get_json(&url).await?;
+        let username = resp["login"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Failed to parse 'login' from GitHub user response"))?;
+        info!(username, "Fetched authenticated GitHub user");
+        Ok(username.to_string())
+    }
+
     /// Add a comment to a GitHub issue.
     pub async fn add_issue_comment(
         &self,

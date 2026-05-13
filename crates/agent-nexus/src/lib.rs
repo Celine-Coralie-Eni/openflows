@@ -4,7 +4,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use config::{
     state::{KEY_COMMAND_GATE, KEY_PENDING_PRS, KEY_TICKETS, KEY_WORKER_SLOTS},
-    Registry, Ticket, TicketStatus, WorkerSlot, WorkerStatus, ACTION_MERGE_PRS, ACTION_NO_WORK,
+    AgentDef, Registry, Ticket, TicketStatus, WorkerSlot, WorkerStatus, ACTION_MERGE_PRS,
+    ACTION_NO_WORK,
 };
 use pocketflow_core::{node::STOP_SIGNAL, Action, Node, SharedStore};
 use serde::{Deserialize, Serialize};
@@ -560,7 +561,7 @@ impl NexusNode {
 
     /// Sync work assignment to GitHub by assigning the issue to the forge worker,
     /// adding a comment indicating assignment, and optionally adding labels.
-    /// The forge worker's GitHub username is defined in forge.agent.md as `forge-bot`.
+    /// The forge worker's GitHub username is loaded from the agent definition (forge.agent.md).
     async fn sync_assignment_to_github(
         &self,
         worker_id: &str,
@@ -599,16 +600,72 @@ impl NexusNode {
 
         let client = github::GithubRestClient::new(&token);
 
-        // Assign to forge-bot (defined in forge.agent.md)
-        const FORGE_BOT_USERNAME: &str = "forge-bot";
-        client
-            .assign_issue(owner, repo, issue_number, FORGE_BOT_USERNAME)
-            .await?;
+        // Load the agent definition to get the GitHub username for the worker
+        // Worker IDs are typically in format "forge-1", "forge-2", etc.
+        let agent_type = worker_id.split('-').next().unwrap_or("forge");
+        let agent_def_path = self
+            .registry_path
+            .parent()
+            .map(|p| p.join("agents").join(format!("{}.agent.md", agent_type)))
+            .unwrap_or_else(|| {
+                PathBuf::from(format!(
+                    "orchestration/agent/agents/{}.agent.md",
+                    agent_type
+                ))
+            });
+
+        let github_username = match AgentDef::load(&agent_def_path) {
+            Ok(def) => def.github.trim().to_string(),
+            Err(e) => {
+                warn!(
+                    worker_id,
+                    agent_type,
+                    path = %agent_def_path.display(),
+                    error = %e,
+                    "Failed to load agent definition — using empty GitHub username"
+                );
+                String::new()
+            }
+        };
+
+        // Only attempt assignment if a valid GitHub username is configured
+        let assignee_display = if !github_username.is_empty() {
+            match client
+                .assign_issue(owner, repo, issue_number, &github_username)
+                .await
+            {
+                Ok(_) => github_username.clone(),
+                Err(e) => {
+                    let err_str = e.to_string();
+                    // Check if it's a 422 validation error (invalid assignee)
+                    if err_str.contains("422") || err_str.contains("Validation Failed") {
+                        warn!(
+                            worker_id,
+                            ticket_id,
+                            github_username,
+                            error = %e,
+                            "GitHub user '{}' is not a valid assignee for this repository — skipping assignment",
+                            github_username
+                        );
+                        // Continue without failing - assignment is not critical
+                        github_username.clone()
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+        } else {
+            warn!(
+                worker_id,
+                ticket_id, "No GitHub username configured for worker — skipping assignment"
+            );
+            "FORGE".to_string()
+        };
 
         // Add comment indicating assignment
         let comment_body = format!(
             "🔧 **Assigned to {} for implementation**\n\nThis issue has been assigned to the FORGE worker ({}) for automated implementation. The agent will analyze the requirements, implement the solution, and open a PR when complete.",
-            FORGE_BOT_USERNAME, worker_id.to_uppercase()
+            assignee_display, worker_id.to_uppercase()
         );
         client
             .add_issue_comment(owner, repo, issue_number, &comment_body)
@@ -623,7 +680,7 @@ impl NexusNode {
             worker_id,
             ticket_id,
             issue_url,
-            assignee = FORGE_BOT_USERNAME,
+            assignee = assignee_display,
             "Successfully synced assignment to GitHub"
         );
 
