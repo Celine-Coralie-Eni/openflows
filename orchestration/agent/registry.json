@@ -1,9 +1,9 @@
 {
-  "default_cli": "claude",
+  "default_cli": "codex",
   "team": [
     {
       "id": "nexus",
-      "cli": "claude",
+      "cli": "codex",
       "active": true,
       "instances": 1,
       "model_backend": "accounts/fireworks/models/kimi-k2p5",
@@ -11,7 +11,7 @@
     },
     {
       "id": "forge",
-      "cli": "claude",
+      "cli": "codex",
       "active": true,
       "instances": 2,
       "model_backend": "accounts/fireworks/models/kimi-k2p5",
@@ -19,7 +19,7 @@
     },
     {
       "id": "sentinel",
-      "cli": "claude",
+      "cli": "codex",
       "active": true,
       "instances": 1,
       "model_backend": "accounts/fireworks/models/kimi-k2p5",
@@ -27,7 +27,7 @@
     },
     {
       "id": "vessel",
-      "cli": "claude",
+      "cli": "codex",
       "active": true,
       "instances": 1,
       "model_backend": "accounts/fireworks/models/kimi-k2p5",
@@ -35,7 +35,7 @@
     },
     {
       "id": "lore",
-      "cli": "claude",
+      "cli": "codex",
       "active": true,
       "instances": 1,
       "model_backend": "accounts/fireworks/models/kimi-k2p5",

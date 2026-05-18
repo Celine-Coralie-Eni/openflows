@@ -145,7 +145,7 @@ impl PairConfig {
             proxy_url: None,
             github_token: github_token.into(),
             max_resets: 10,
-            watchdog_timeout_secs: 1200,
+            watchdog_timeout_secs: 3600, // 1 hour - must be > SENTINEL timeout
             cli_backend: CliBackend::default(),
             verify_command: None,
             max_verify_attempts: 3,
@@ -172,7 +172,7 @@ impl PairConfig {
             proxy_url: None,
             github_token: github_token.into(),
             max_resets: 10,
-            watchdog_timeout_secs: 1200,
+            watchdog_timeout_secs: 3600, // 1 hour - must be > SENTINEL timeout
             cli_backend: CliBackend::default(),
             verify_command: None,
             max_verify_attempts: 3,
@@ -199,7 +199,7 @@ impl PairConfig {
             proxy_url: Some(proxy_url.into()),
             github_token: github_token.into(),
             max_resets: 10,
-            watchdog_timeout_secs: 1200,
+            watchdog_timeout_secs: 3600, // 1 hour - must be > SENTINEL timeout
             cli_backend: CliBackend::default(),
             verify_command: None,
             max_verify_attempts: 3,

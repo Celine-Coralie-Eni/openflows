@@ -24,10 +24,32 @@ use crate::watchdog::Watchdog;
 use crate::watcher::SharedDirWatcher;
 use crate::worktree::{MergeMainResult, SetupWarning, WorktreeManager};
 
-const DEFAULT_SENTINEL_TIMEOUT_SECS: u64 = 120;
-const FORGE_STARTUP_TIMEOUT_SECS: u64 = 300;
+/// Default SENTINEL timeout in seconds. Can be overridden via SPRINTLESS_SENTINEL_TIMEOUT_SECS env var.
+/// Must be greater than LLM_TIMEOUT_SECS to allow the LLM time to respond.
+const DEFAULT_SENTINEL_TIMEOUT_SECS: u64 = 600; // 10 minutes
+
+/// Default FORGE startup timeout. Can be overridden via SPRINTLESS_FORGE_STARTUP_TIMEOUT_SECS env var.
+/// FORGE needs time to initialize and write PLAN.md.
+const DEFAULT_FORGE_STARTUP_TIMEOUT_SECS: u64 = 600; // 10 minutes
+
 const MAX_SENTINEL_RETRIES: u32 = 2;
 const MIN_SENTINEL_RETRY_INTERVAL_SECS: u64 = 30;
+
+/// Get the SENTINEL timeout from environment or use default.
+fn get_sentinel_timeout_secs() -> u64 {
+    std::env::var("SPRINTLESS_SENTINEL_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_SENTINEL_TIMEOUT_SECS)
+}
+
+/// Get the FORGE startup timeout from environment or use default.
+fn get_forge_startup_timeout_secs() -> u64 {
+    std::env::var("SPRINTLESS_FORGE_STARTUP_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_FORGE_STARTUP_TIMEOUT_SECS)
+}
 
 /// Normalize agent-written STATUS.json status strings to canonical values.
 ///
@@ -667,13 +689,14 @@ impl ForgeSentinelPair {
             }
 
             // Check for FORGE startup timeout (no PLAN.md written)
+            let forge_startup_timeout = get_forge_startup_timeout_secs();
             let plan_path = self.config.shared.join("PLAN.md");
             if !plan_path.exists()
-                && self.forge_spawn_time.elapsed().as_secs() > FORGE_STARTUP_TIMEOUT_SECS
+                && self.forge_spawn_time.elapsed().as_secs() > forge_startup_timeout
             {
                 error!(
                     "FORGE startup timeout - no PLAN.md after {}s",
-                    FORGE_STARTUP_TIMEOUT_SECS
+                    forge_startup_timeout
                 );
 
                 // Check if FORGE is still running
@@ -1409,7 +1432,7 @@ impl ForgeSentinelPair {
                 };
                 (base, profile.complexity.clone())
             }
-            None => (DEFAULT_SENTINEL_TIMEOUT_SECS, Complexity::Medium),
+            None => (get_sentinel_timeout_secs(), Complexity::Medium),
         };
         compute_effective_timeout(base_secs, &complexity)
     }
