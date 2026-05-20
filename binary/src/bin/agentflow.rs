@@ -8,11 +8,10 @@ use config::{
     ACTION_DOCS_COMPLETE, ACTION_FAILED, ACTION_MERGE_PRS, ACTION_NO_WORK, ACTION_PR_OPENED,
     ACTION_WORK_ASSIGNED, KEY_PENDING_PRS, KEY_TICKETS, KEY_WORKER_SLOTS,
 };
-use nexus_chat::{run_chat_loop, ChatConfig};
+use nexus_gateway::{Gateway, GatewayConfig};
 use pair_harness::WorkspaceManager;
 use pocketflow_core::{Action, Flow, SharedStore};
 use std::sync::Arc;
-use tokio::sync::mpsc;
 use tracing::info;
 
 #[tokio::main]
@@ -72,7 +71,46 @@ async fn main() -> Result<()> {
     store.set(KEY_WORKER_SLOTS, serde_json::json!({})).await;
     store.set(KEY_PENDING_PRS, serde_json::json!([])).await;
 
-    // 4. Initialize Nodes
+    // 4. Build Gateway and register channel plugins
+    let gateway_config = GatewayConfig::from_env();
+    let mut gateway = Gateway::new(store.clone());
+    if gateway_config.dev_mode || gateway_config.channels.is_empty() {
+        gateway.register_plugin(Arc::new(nexus_gateway::MockPlugin::new()));
+        info!("Gateway registered MockPlugin (dev mode)");
+    } else {
+        for channel_id in gateway_config.active_channels() {
+            match channel_id.as_str() {
+                "slack" => {
+                    if let Some(config) = gateway_config.channels.get("slack") {
+                        if let Some(plugin) = nexus_gateway::channels::slack::SlackPlugin::from_config(config) {
+                            gateway.register_plugin(Arc::new(plugin));
+                            info!("Gateway registered SlackPlugin");
+                        }
+                    }
+                }
+                "discord" => {
+                    if let Some(config) = gateway_config.channels.get("discord") {
+                        if let Some(plugin) = nexus_gateway::channels::discord::DiscordPlugin::from_config(config) {
+                            gateway.register_plugin(Arc::new(plugin));
+                            info!("Gateway registered DiscordPlugin");
+                        }
+                    }
+                }
+                "whatsapp" => {
+                    if let Some(config) = gateway_config.channels.get("whatsapp") {
+                        if let Some(plugin) = nexus_gateway::channels::whatsapp::WhatsAppPlugin::from_config(config) {
+                            gateway.register_plugin(Arc::new(plugin));
+                            info!("Gateway registered WhatsAppPlugin");
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let gateway = Arc::new(gateway);
+
+    // 5. Initialize Nodes
     // NEXUS: Orchestrator that assigns work
     // ForgePairNode: Event-driven FORGE-SENTINEL pair with full review lifecycle
     // VesselNode: Merge gatekeeper - polls CI, merges PRs, emits ticket_merged events
@@ -86,18 +124,17 @@ async fn main() -> Result<()> {
         .join("agent")
         .join("registry.json");
 
-    let nexus = Arc::new(NexusNode::with_chat(
+    let nexus = Arc::new(NexusNode::with_gateway(
         persona_path,
         registry_path.clone(),
-        store.clone(),
-        ChatConfig::from_env(),
+        gateway.clone(),
     ));
     let forge_pair = Arc::new(ForgePairNode::new(&workspace_dir, &github_token));
     let vessel = Arc::new(VesselNode::from_env());
     let lore = Arc::new(LoreNode::new_with_registry(
         &workspace_dir,
         orchestrator_dir.join("orchestration/agent/agents/lore.agent.md"),
-        registry_path,
+        registry_path.clone(),
     )?);
 
     // 4. Setup Flow with Routing
@@ -155,34 +192,40 @@ async fn main() -> Result<()> {
             vec![(ACTION_DOCS_COMPLETE, "nexus"), (ACTION_NO_WORK, "nexus")],
         );
 
-    // 5. Start chat loop for receiving human messages
-    let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
-    let chat_config = ChatConfig::from_env();
-    if chat_config.enabled {
-        let store_clone = store.clone();
-        let config_clone = chat_config.clone();
-        tokio::spawn(async move {
-            run_chat_loop(store_clone, config_clone, shutdown_rx).await;
-        });
-        info!("NEXUS chat loop started - listening for human commands");
+    // 6. Start Gateway listeners for receiving human messages
+    let listener_handles = if gateway_config.enabled {
+        let handles = gateway.start_listeners().await;
+        info!(channels = ?gateway.active_channels(), "Gateway listeners started");
 
-        // Background task: process human commands even when flow is at other nodes
+        // Background task: process gateway messages even when flow is at other nodes
         let nexus_bg = nexus.clone();
         let store_bg = store.clone();
+        let registry_path_bg = registry_path.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 interval.tick().await;
-                if let Err(e) = nexus_bg.process_human_commands(&store_bg).await {
-                    tracing::warn!("Background human command processing error: {}", e);
+                if let Some(gw) = nexus_bg.gateway() {
+                    if let Err(e) = agent_nexus::react_loop::process_gateway_messages(
+                        gw,
+                        &store_bg,
+                        &registry_path_bg,
+                    )
+                    .await
+                    {
+                        tracing::warn!("Background gateway message processing error: {}", e);
+                    }
                 }
             }
         });
-        info!("NEXUS background command processor started");
-    }
+        info!("NEXUS background gateway processor started");
+        handles
+    } else {
+        vec![]
+    };
 
-    // 6. Run Flow
+    // 7. Run Flow
     info!("Running orchestration loop for repository: {}", repo);
     info!("Each worker will use event-driven FORGE-SENTINEL pair with:");
     info!("  - PLAN.md -> CONTRACT.md (plan review)");
@@ -196,8 +239,12 @@ async fn main() -> Result<()> {
 
     let final_action = flow.run(&store).await?;
 
-    // Signal chat loop to shutdown
-    let _ = shutdown_tx.send(()).await;
+    // Signal gateway shutdown
+    gateway.shutdown().await?;
+    for handle in listener_handles {
+        handle.abort();
+    }
+    info!("Gateway listeners stopped");
 
     info!("Orchestration flow halted with action: {}", final_action);
 

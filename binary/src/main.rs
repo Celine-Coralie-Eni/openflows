@@ -3,11 +3,10 @@ mod nodes;
 mod state;
 
 use anyhow::Result;
-use nexus_chat::{run_chat_loop, ChatConfig};
+use nexus_gateway::{Gateway, GatewayConfig};
 use pocketflow_core::{Action, Flow, SharedStore};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::nodes::{ForgeNode, LoreNode, NexusNode, VesselConfig, VesselNode};
@@ -100,14 +99,52 @@ async fn main() -> Result<()> {
         .await;
     store.set(KEY_PENDING_PRS, serde_json::json!([])).await;
 
-    // 4. Build Flow - use orchestration/agent directory for personas
+    // 4. Build Gateway and register channel plugins
+    let gateway_config = GatewayConfig::from_env();
+    let mut gateway = Gateway::new(store.clone());
+    if gateway_config.dev_mode || gateway_config.channels.is_empty() {
+        gateway.register_plugin(Arc::new(nexus_gateway::MockPlugin::new()));
+        info!("Gateway registered MockPlugin (dev mode)");
+    } else {
+        for channel_id in gateway_config.active_channels() {
+            match channel_id.as_str() {
+                "slack" => {
+                    if let Some(config) = gateway_config.channels.get("slack") {
+                        if let Some(plugin) = nexus_gateway::channels::slack::SlackPlugin::from_config(config) {
+                            gateway.register_plugin(Arc::new(plugin));
+                            info!("Gateway registered SlackPlugin");
+                        }
+                    }
+                }
+                "discord" => {
+                    if let Some(config) = gateway_config.channels.get("discord") {
+                        if let Some(plugin) = nexus_gateway::channels::discord::DiscordPlugin::from_config(config) {
+                            gateway.register_plugin(Arc::new(plugin));
+                            info!("Gateway registered DiscordPlugin");
+                        }
+                    }
+                }
+                "whatsapp" => {
+                    if let Some(config) = gateway_config.channels.get("whatsapp") {
+                        if let Some(plugin) = nexus_gateway::channels::whatsapp::WhatsAppPlugin::from_config(config) {
+                            gateway.register_plugin(Arc::new(plugin));
+                            info!("Gateway registered WhatsAppPlugin");
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let gateway = Arc::new(gateway);
+
+    // 5. Build Flow - use orchestration/agent directory for personas
     let orchestrator_dir = std::env::current_dir()?;
     let registry_path = orchestrator_dir.join("orchestration/agent/registry.json");
-    let nexus = Arc::new(NexusNode::with_chat(
+    let nexus = Arc::new(NexusNode::with_gateway(
         orchestrator_dir.join("orchestration/agent/agents/nexus.agent.md"),
         registry_path.clone(),
-        store.clone(),
-        ChatConfig::from_env(),
+        gateway.clone(),
     ));
     let forge = Arc::new(ForgeNode::new_with_registry(
         &workspace_dir,
@@ -169,26 +206,27 @@ async fn main() -> Result<()> {
         )
         .max_steps(20);
 
-    // 5. Start chat loop for receiving human messages
-    let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
-    let chat_config = ChatConfig::from_env();
-    if chat_config.enabled {
-        let store_clone = store.clone();
-        let config_clone = chat_config.clone();
-        tokio::spawn(async move {
-            run_chat_loop(store_clone, config_clone, shutdown_rx).await;
-        });
-        info!("NEXUS chat loop started - listening for human commands");
-    }
+    // 6. Start Gateway listeners for receiving human messages
+    let listener_handles = if gateway_config.enabled {
+        let handles = gateway.start_listeners().await;
+        info!(channels = ?gateway.active_channels(), "Gateway listeners started");
+        handles
+    } else {
+        vec![]
+    };
 
-    // 6. Run Flow
+    // 7. Run Flow
     info!("Starting Flow execution loop...");
     let _final_action = flow.run(&store).await?;
 
-    // Signal chat loop to shutdown
-    let _ = shutdown_tx.send(()).await;
+    // Signal gateway shutdown
+    gateway.shutdown().await?;
+    for handle in listener_handles {
+        handle.abort();
+    }
+    info!("Gateway listeners stopped");
 
-    // 7. Results
+    // 8. Results
     let final_slots: HashMap<String, WorkerSlot> =
         store.get_typed(KEY_WORKER_SLOTS).await.unwrap_or_default();
 

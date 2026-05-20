@@ -56,10 +56,9 @@ dependencies = [
  "agent-client",
  "anyhow",
  "async-trait",
- "chrono",
  "config",
  "github",
- "nexus-chat",
+ "nexus-gateway",
  "pocketflow-core",
  "serde",
  "serde_json",
@@ -79,7 +78,7 @@ dependencies = [
  "config",
  "dotenvy",
  "mockito",
- "nexus-chat",
+ "nexus-gateway",
  "pair-harness",
  "pocketflow-core",
  "serde_json",
@@ -1313,9 +1312,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "nexus-chat"
+name = "nexus-gateway"
 version = "0.1.0"
 dependencies = [
+ "agent-client",
  "anyhow",
  "async-trait",
  "chrono",

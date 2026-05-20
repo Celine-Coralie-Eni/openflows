@@ -6,13 +6,17 @@ use config::{
     state::{KEY_COMMAND_GATE, KEY_PENDING_PRS, KEY_TICKETS, KEY_WORKER_SLOTS},
     Registry, Ticket, TicketStatus, WorkerSlot, WorkerStatus, ACTION_MERGE_PRS, ACTION_NO_WORK,
 };
-use nexus_chat::{ChatConfig, HumanChannel, HumanCommand, HumanMessage, MessageType, NexusMessage};
-use pocketflow_core::{command_gate::CommandGate, node::STOP_SIGNAL, Action, Node, SharedStore};
+use nexus_gateway::messages::{OutboundMessage, OutboundMessageType};
+use pocketflow_core::{node::STOP_SIGNAL, Action, Node, SharedStore};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tracing::{info, warn};
+
+mod command_executor;
+pub mod react_loop;
 
 const NO_WORK_THRESHOLD: u32 = 3;
 const KEY_NO_WORK_COUNT: &str = "_no_work_count";
@@ -186,7 +190,7 @@ pub struct FlowRecovery {
 pub struct NexusNode {
     pub persona_path: PathBuf,
     pub registry_path: PathBuf,
-    human_channel: Option<HumanChannel>,
+    gateway: Option<Arc<nexus_gateway::Gateway>>,
 }
 
 impl NexusNode {
@@ -194,26 +198,24 @@ impl NexusNode {
         Self {
             persona_path: persona_path.into(),
             registry_path: registry_path.into(),
-            human_channel: None,
+            gateway: None,
         }
     }
 
-    pub fn with_chat(
+    pub fn with_gateway(
         persona_path: impl Into<PathBuf>,
         registry_path: impl Into<PathBuf>,
-        store: SharedStore,
-        chat_config: ChatConfig,
+        gateway: Arc<nexus_gateway::Gateway>,
     ) -> Self {
-        let human_channel = if chat_config.is_configured() {
-            Some(HumanChannel::new(store, chat_config))
-        } else {
-            None
-        };
         Self {
             persona_path: persona_path.into(),
             registry_path: registry_path.into(),
-            human_channel,
+            gateway: Some(gateway),
         }
+    }
+
+    pub fn gateway(&self) -> Option<&nexus_gateway::Gateway> {
+        self.gateway.as_deref()
     }
 
     fn resolve_github_token(&self) -> Result<String> {
@@ -221,10 +223,10 @@ impl NexusNode {
         registry.resolve_github_token("nexus")
     }
 
-    async fn notify_human(&self, msg: NexusMessage) {
-        if let Some(ref channel) = self.human_channel {
-            if let Err(e) = channel.notify(msg).await {
-                warn!("Failed to send human notification: {}", e);
+    async fn notify_human(&self, msg: OutboundMessage) {
+        if let Some(ref gateway) = self.gateway {
+            if let Err(e) = gateway.broadcast(&msg).await {
+                warn!("Failed to send human notification via gateway: {}", e);
             }
         }
     }
@@ -803,562 +805,6 @@ impl NexusNode {
 
         recovery
     }
-
-    async fn pause_ticket(&self, store: &SharedStore, ticket_id: &str) -> Result<()> {
-        let mut tickets: Vec<Ticket> = store.get_typed(KEY_TICKETS).await.unwrap_or_default();
-        if let Some(ticket) = tickets.iter_mut().find(|t| t.id == ticket_id) {
-            let worker_id = match &ticket.status {
-                TicketStatus::InProgress { worker_id } => worker_id.clone(),
-                TicketStatus::Assigned { worker_id } => worker_id.clone(),
-                _ => return Ok(()),
-            };
-
-            ticket.status = TicketStatus::AwaitingHuman {
-                worker_id: worker_id.clone(),
-                reason: "paused_by_human".to_string(),
-                attempts: 0,
-            };
-
-            let mut slots: HashMap<String, WorkerSlot> =
-                store.get_typed(KEY_WORKER_SLOTS).await.unwrap_or_default();
-            if let Some(slot) = slots.get_mut(&worker_id) {
-                slot.status = WorkerStatus::Suspended {
-                    ticket_id: ticket_id.to_string(),
-                    reason: "paused_by_human".to_string(),
-                    issue_url: ticket.issue_url.clone(),
-                };
-            }
-            store.set(KEY_WORKER_SLOTS, json!(slots)).await;
-            store.set(KEY_TICKETS, json!(tickets)).await;
-        }
-        Ok(())
-    }
-
-    async fn resume_ticket(&self, store: &SharedStore, ticket_id: &str) -> Result<()> {
-        let mut tickets: Vec<Ticket> = store.get_typed(KEY_TICKETS).await.unwrap_or_default();
-        if let Some(ticket) = tickets.iter_mut().find(|t| t.id == ticket_id) {
-            if let TicketStatus::AwaitingHuman { worker_id, .. } = &ticket.status {
-                let worker_id = worker_id.clone();
-                ticket.status = TicketStatus::Open;
-                ticket.attempts = 0;
-
-                let mut slots: HashMap<String, WorkerSlot> =
-                    store.get_typed(KEY_WORKER_SLOTS).await.unwrap_or_default();
-                if let Some(slot) = slots.get_mut(&worker_id) {
-                    slot.status = WorkerStatus::Idle;
-                }
-                store.set(KEY_WORKER_SLOTS, json!(slots)).await;
-            }
-        }
-        store.set(KEY_TICKETS, json!(tickets)).await;
-        Ok(())
-    }
-
-    async fn block_worker(&self, store: &SharedStore, worker_id: &str, reason: &str) -> Result<()> {
-        let mut slots: HashMap<String, WorkerSlot> =
-            store.get_typed(KEY_WORKER_SLOTS).await.unwrap_or_default();
-        if let Some(slot) = slots.get_mut(worker_id) {
-            if let WorkerStatus::Assigned { ticket_id, .. }
-            | WorkerStatus::Working { ticket_id, .. } = &slot.status
-            {
-                let mut tickets: Vec<Ticket> = store.get_typed(KEY_TICKETS).await.unwrap_or_default();
-                if let Some(ticket) = tickets.iter_mut().find(|t| t.id == *ticket_id) {
-                    ticket.status = TicketStatus::AwaitingHuman {
-                        worker_id: worker_id.to_string(),
-                        reason: format!("blocked_by_human: {}", reason),
-                        attempts: 0,
-                    };
-                    store.set(KEY_TICKETS, json!(tickets)).await;
-                }
-                slot.status = WorkerStatus::Suspended {
-                    ticket_id: ticket_id.clone(),
-                    reason: format!("blocked_by_human: {}", reason),
-                    issue_url: None,
-                };
-            }
-        }
-        store.set(KEY_WORKER_SLOTS, json!(slots)).await;
-        Ok(())
-    }
-
-    async fn reroute_work(
-        &self,
-        store: &SharedStore,
-        from_worker: &str,
-        to_worker: &str,
-    ) -> Result<()> {
-        let mut slots: HashMap<String, WorkerSlot> =
-            store.get_typed(KEY_WORKER_SLOTS).await.unwrap_or_default();
-
-        let ticket_id = if let Some(from_slot) = slots.get(from_worker) {
-            match &from_slot.status {
-                WorkerStatus::Assigned { ticket_id, .. }
-                | WorkerStatus::Working { ticket_id, .. } => Some(ticket_id.clone()),
-                _ => None,
-            }
-        } else {
-            None
-        };
-
-        if let Some(ticket_id) = ticket_id {
-            if let Some(from_slot) = slots.get_mut(from_worker) {
-                from_slot.status = WorkerStatus::Idle;
-            }
-            if let Some(to_slot) = slots.get_mut(to_worker) {
-                let mut tickets: Vec<Ticket> =
-                    store.get_typed(KEY_TICKETS).await.unwrap_or_default();
-                if let Some(ticket) = tickets.iter_mut().find(|t| t.id == ticket_id) {
-                    ticket.status = TicketStatus::Assigned {
-                        worker_id: to_worker.to_string(),
-                    };
-                    to_slot.status = WorkerStatus::Assigned {
-                        ticket_id: ticket_id.clone(),
-                        issue_url: ticket.issue_url.clone(),
-                    };
-                    store.set(KEY_TICKETS, json!(tickets)).await;
-                }
-            }
-        }
-        store.set(KEY_WORKER_SLOTS, json!(slots)).await;
-        Ok(())
-    }
-
-    pub async fn process_human_commands(&self, store: &SharedStore) -> Result<()> {
-        if let Some(ref channel) = self.human_channel {
-            let messages = channel.pending_messages().await;
-            for msg in messages {
-                let cmd = self.interpret_message(&msg).await;
-                if let Some(cmd) = cmd {
-                    match cmd.command {
-                        MessageType::PauseWorkflow => {
-                            if let Some(ticket_id) = &cmd.ticket_id {
-                                self.pause_ticket(store, ticket_id).await?;
-                                info!(ticket_id, "Paused by human message");
-                                self.notify_human(NexusMessage::status_update(&format!(
-                                    "Ticket {} paused",
-                                    ticket_id
-                                )))
-                                .await;
-                            }
-                        }
-                        MessageType::ResumeWorkflow => {
-                            if let Some(ticket_id) = &cmd.ticket_id {
-                                self.resume_ticket(store, ticket_id).await?;
-                                info!(ticket_id, "Resumed by human message");
-                                self.notify_human(NexusMessage::status_update(&format!(
-                                    "Ticket {} resumed",
-                                    ticket_id
-                                )))
-                                .await;
-                            }
-                        }
-                        MessageType::ApproveCommand => {
-                            if let Some(worker_id) = &cmd.worker_id {
-                                CommandGate::approve(store, worker_id).await?;
-                                info!(worker_id, "Approved by human message");
-                                self.notify_human(NexusMessage::status_update(&format!(
-                                    "Command approved for {}",
-                                    worker_id
-                                )))
-                                .await;
-                            }
-                        }
-                        MessageType::BlockAgent => {
-                            if let Some(worker_id) = &cmd.worker_id {
-                                let reason = cmd.payload.as_deref().unwrap_or("blocked_by_human");
-                                self.block_worker(store, worker_id, reason).await?;
-                                info!(worker_id, "Blocked by human message");
-                                self.notify_human(NexusMessage::status_update(&format!(
-                                    "Worker {} blocked",
-                                    worker_id
-                                )))
-                                .await;
-                            }
-                        }
-                        MessageType::RerouteAgent => {
-                            let from_worker = cmd.worker_id.as_deref();
-                            let to_worker = cmd.payload.as_deref();
-                            if let (Some(from), Some(to)) = (from_worker, to_worker) {
-                                self.reroute_work(store, from, to).await?;
-                                info!(from, to, "Rerouted by human message");
-                                self.notify_human(NexusMessage::status_update(&format!(
-                                    "Work rerouted from {} to {}",
-                                    from, to
-                                )))
-                                .await;
-                            }
-                        }
-                        MessageType::AnswerQuestion => {
-                            if let Some(ticket_id) = &cmd.ticket_id {
-                                let response_key = format!("human_response:{}", ticket_id);
-                                if let Some(answer) = &cmd.payload {
-                                    store.set(&response_key, json!(answer)).await;
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                } else {
-                    info!(user = msg.user_id, text = %msg.text, "Message from human not interpreted as command");
-                    // Send a helpful reply so the user knows the message was received but not understood
-                    let help_text = format!(
-                        "I received your message but couldn't interpret it as a command. \
-                        Available commands: `pause T-XXX`, `resume T-XXX`, `approve forge-X`, \
-                        `block forge-X [reason]`, `reroute forge-X forge-Y`, `answer T-XXX <text>`. \
-                        You can also @mention me or start with my name."
-                    );
-                    self.notify_human(NexusMessage::status_update(&help_text)).await;
-                }
-                channel.ack_message(&msg).await;
-            }
-        }
-        Ok(())
-    }
-
-    async fn interpret_message(&self, msg: &HumanMessage) -> Option<HumanCommand> {
-        let text = msg.text.trim();
-        let lower = text.to_lowercase();
-
-        // Try pattern-based interpretation first
-        if let Some(cmd) = self.try_pattern_match(text, &lower, msg) {
-            return Some(cmd);
-        }
-
-        // If no pattern matches, use LLM to interpret
-        if let Some(ref channel) = self.human_channel {
-            if channel.is_dev_mode() {
-                return None;
-            }
-        }
-
-        self.interpret_with_llm(text, msg).await
-    }
-
-    fn try_pattern_match(&self, text: &str, lower: &str, msg: &HumanMessage) -> Option<HumanCommand> {
-        // Helper: check that lower starts with an exact command word (space or EOL after it)
-        let starts_with_cmd = |cmd: &str| lower == cmd || lower.starts_with(&format!("{} ", cmd));
-        // Helper: fuzzy match — first word starts with cmd (catches typos like "assigne", "assigning")
-        let fuzzy_cmd = |cmd: &str| {
-            let first = lower.split_whitespace().next().unwrap_or("");
-            first == cmd || first.starts_with(cmd)
-        };
-
-        // Direct command patterns
-        if starts_with_cmd("pause") || fuzzy_cmd("pause") {
-            let ticket_id = extract_ticket_id(text);
-            return ticket_id.map(|id| HumanCommand::pause_workflow(&id, &msg.user_id, &msg.channel_id));
-        }
-
-        if starts_with_cmd("resume") || fuzzy_cmd("resume") {
-            let ticket_id = extract_ticket_id(text);
-            return ticket_id.map(|id| HumanCommand::resume_workflow(&id, &msg.user_id, &msg.channel_id));
-        }
-
-        if starts_with_cmd("approve") || fuzzy_cmd("approve") {
-            let worker_id = extract_worker_id(text);
-            return Some(HumanCommand::approve_command(
-                &worker_id.unwrap_or_else(|| "unknown".to_string()),
-                &msg.user_id,
-                &msg.channel_id,
-            ));
-        }
-
-        if starts_with_cmd("reject") || starts_with_cmd("deny") || fuzzy_cmd("reject") || fuzzy_cmd("deny") {
-            let worker_id = extract_worker_id(text);
-            return Some(HumanCommand {
-                command: MessageType::BlockAgent,
-                ticket_id: None,
-                worker_id,
-                payload: Some("rejected by human".to_string()),
-                user_id: msg.user_id.clone(),
-                channel_id: msg.channel_id.clone(),
-                thread_ts: None,
-                timestamp: chrono::Utc::now(),
-            });
-        }
-
-        if starts_with_cmd("block") || fuzzy_cmd("block") {
-            let parts: Vec<&str> = text.split_whitespace().collect();
-            if parts.len() >= 2 {
-                let worker_id = parts[1].to_string();
-                let reason = parts.get(2..).map(|p| p.join(" ")).unwrap_or_default();
-                return Some(HumanCommand::block_agent(&worker_id, &reason, &msg.user_id, &msg.channel_id));
-            }
-        }
-
-        if starts_with_cmd("reroute") || starts_with_cmd("reassign") || starts_with_cmd("assign")
-            || fuzzy_cmd("reroute") || fuzzy_cmd("reassign") || fuzzy_cmd("assign")
-        {
-            let parts: Vec<&str> = text.split_whitespace().collect();
-            if parts.len() >= 3 {
-                // Try to read two worker IDs (reroute case): "reroute forge-1 forge-2"
-                let (from_worker, to_worker) = extract_two_workers(&parts);
-                if from_worker.contains('-') && to_worker.contains('-') {
-                    return Some(HumanCommand::reroute_agent(&from_worker, &to_worker, &msg.user_id, &msg.channel_id));
-                }
-
-                // Single worker assignment case: "assign forge2 to a ticket" or "assign forge-1 to T-001"
-                // Try to extract one worker ID and an optional ticket ID
-                if parts.len() >= 2 {
-                    let worker_id = normalize_worker_id(parts[1]);
-                    if worker_id.starts_with("forge-") || worker_id.starts_with("agent-") {
-                        let ticket_id = extract_ticket_id(text);
-                        // For single worker assignment, we'll use approve_command as the command type
-                        // since it's the closest match - approving a worker to work on something
-                        return Some(HumanCommand {
-                            command: MessageType::ApproveCommand,
-                            ticket_id,
-                            worker_id: Some(worker_id),
-                            payload: Some("assigned by human".to_string()),
-                            user_id: msg.user_id.clone(),
-                            channel_id: msg.channel_id.clone(),
-                            thread_ts: None,
-                            timestamp: chrono::Utc::now(),
-                        });
-                    }
-                }
-            }
-        }
-
-        if starts_with_cmd("answer") || fuzzy_cmd("answer") {
-            let parts: Vec<&str> = text.split_whitespace().collect();
-            if parts.len() >= 2 {
-                let ticket_id = extract_ticket_id(text).unwrap_or_else(|| parts[1].trim_end_matches(':').to_string());
-                let answer = parts.get(2..).map(|p| p.join(" ")).unwrap_or_default();
-                return Some(HumanCommand::answer_question(&ticket_id, &answer, &msg.user_id, &msg.channel_id));
-            }
-        }
-
-        // Question/answer format: "yes", "no", "option 1", etc.
-        if lower == "yes" || lower == "no" || lower.starts_with("option ") {
-            // This is likely an answer to a question
-            // Try to find the most recent question context
-            return Some(HumanCommand {
-                command: MessageType::AnswerQuestion,
-                ticket_id: None,
-                worker_id: None,
-                payload: Some(text.to_string()),
-                user_id: msg.user_id.clone(),
-                channel_id: msg.channel_id.clone(),
-                thread_ts: None,
-                timestamp: chrono::Utc::now(),
-            });
-        }
-
-        None
-    }
-
-    async fn interpret_with_llm(&self, text: &str, msg: &HumanMessage) -> Option<HumanCommand> {
-        // Build a prompt asking the LLM to interpret the message
-        // Output must match AgentDecision schema: {action, notes, assign_to, ticket_id, issue_url}
-        let prompt = format!(
-            r#"You are NEXUS, interpreting a message from a human operator.
-Parse the following message into a structured command.
-
-Human message: "{}"
-
-Available action types and required fields:
-- pause_workflow: set ticket_id (string, e.g. "T-001")
-- resume_workflow: set ticket_id (string)
-- approve_command: set assign_to to worker_id (string, e.g. "forge-1")
-- block_agent: set assign_to to worker_id (string), put reason in notes (string)
-- reroute_agent: set assign_to to from_worker (string, e.g. "forge-1"), put to_worker in notes (string, e.g. "forge-2")
-- answer_question: set ticket_id (string), put answer in notes (string)
-- status_query: no fields needed
-- general_message: no fields needed (use when message is not a command)
-
-RULES:
-1. ALL field values must be simple strings or null. NEVER use nested JSON objects.
-2. For reroute_agent, put the source worker in "assign_to" and destination worker in "notes".
-3. If a worker is mentioned as "forge 1", normalize it to "forge-1".
-4. If the message is vague or missing required fields, use general_message.
-5. Put any additional context or parameters in the "notes" field.
-
-Respond with ONLY a JSON object matching this schema. No markdown, no explanations.
-
-Example valid responses:
-{{"action": "pause_workflow", "notes": "", "assign_to": null, "ticket_id": "T-001", "issue_url": null}}
-{{"action": "reroute_agent", "notes": "forge-2", "assign_to": "forge-1", "ticket_id": null, "issue_url": null}}
-{{"action": "block_agent", "notes": "stuck on test failure", "assign_to": "forge-1", "ticket_id": null, "issue_url": null}}
-{{"action": "general_message", "notes": "", "assign_to": null, "ticket_id": null, "issue_url": null}}"#,
-            text
-        );
-
-        // Use the existing LLM runner to interpret
-        match self.run_llm_interpretation(&prompt).await {
-            Ok(result) => {
-                if let Some(cmd_type) = result.get("command_type").and_then(|v| v.as_str()) {
-                    match cmd_type {
-                        "pause_workflow" => {
-                            if let Some(ticket_id) = result.get("ticket_id").and_then(|v| v.as_str()) {
-                                return Some(HumanCommand::pause_workflow(ticket_id, &msg.user_id, &msg.channel_id));
-                            }
-                        }
-                        "resume_workflow" => {
-                            if let Some(ticket_id) = result.get("ticket_id").and_then(|v| v.as_str()) {
-                                return Some(HumanCommand::resume_workflow(ticket_id, &msg.user_id, &msg.channel_id));
-                            }
-                        }
-                        "approve_command" => {
-                            if let Some(worker_id) = result.get("worker_id").and_then(|v| v.as_str()) {
-                                return Some(HumanCommand::approve_command(worker_id, &msg.user_id, &msg.channel_id));
-                            }
-                        }
-                        "block_agent" => {
-                            if let Some(worker_id) = result.get("worker_id").and_then(|v| v.as_str()) {
-                                let reason = result.get("payload").and_then(|v| v.as_str()).unwrap_or("blocked_by_human").to_string();
-                                return Some(HumanCommand::block_agent(worker_id, &reason, &msg.user_id, &msg.channel_id));
-                            }
-                        }
-                        "reroute_agent" => {
-                            if let (Some(from), Some(to)) = (
-                                result.get("worker_id").and_then(|v| v.as_str()),
-                                result.get("payload").and_then(|v| v.as_str()),
-                            ) {
-                                return Some(HumanCommand::reroute_agent(from, to, &msg.user_id, &msg.channel_id));
-                            }
-                        }
-                        "answer_question" => {
-                            if let (Some(ticket_id), Some(answer)) = (
-                                result.get("ticket_id").and_then(|v| v.as_str()),
-                                result.get("payload").and_then(|v| v.as_str()),
-                            ) {
-                                return Some(HumanCommand::answer_question(ticket_id, answer, &msg.user_id, &msg.channel_id));
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                None
-            }
-            Err(e) => {
-                warn!("LLM interpretation failed: {}", e);
-                None
-            }
-        }
-    }
-
-    async fn run_llm_interpretation(&self, prompt: &str) -> Result<Value> {
-        let registry = Registry::load(&self.registry_path)?;
-        let model_backend = registry.get("nexus").and_then(|e| e.model_backend.clone());
-        let github_token = self.resolve_github_token()?;
-
-        let mut runner =
-            AgentRunner::from_env_with_token(model_backend.as_deref(), &github_token).await?;
-        let persona = AgentPersona {
-            id: "nexus-interpreter".to_string(),
-            role: "interpreter".to_string(),
-            system_prompt: "You are a command parser. Respond ONLY with valid JSON.".to_string(),
-        };
-
-        let context = json!({
-            "prompt": prompt,
-            "format": "json"
-        });
-
-        let decision: AgentDecision = runner.run(&persona, context, 5).await?;
-
-        // decision.action contains the command type (e.g. "pause_workflow")
-        // decision.notes contains additional context or parameters
-        // decision.assign_to contains worker_id when applicable
-        // decision.ticket_id contains ticket_id when applicable
-        let mut result = serde_json::Map::new();
-        result.insert("action".to_string(), Value::String(decision.action.clone()));
-        result.insert("notes".to_string(), Value::String(decision.notes.clone()));
-        result.insert(
-            "assign_to".to_string(),
-            decision.assign_to.map(Value::String).unwrap_or(Value::Null),
-        );
-        result.insert(
-            "ticket_id".to_string(),
-            decision.ticket_id.map(Value::String).unwrap_or(Value::Null),
-        );
-        result.insert(
-            "issue_url".to_string(),
-            decision.issue_url.map(Value::String).unwrap_or(Value::Null),
-        );
-
-        Ok(Value::Object(result))
-    }
-}
-
-fn extract_ticket_id(text: &str) -> Option<String> {
-    let parts: Vec<&str> = text.split_whitespace().collect();
-    for part in parts {
-        let cleaned = part.trim_end_matches(':');
-        let lower = cleaned.to_lowercase();
-        if lower.starts_with("t-") {
-            let num = lower.trim_start_matches("t-");
-            return Some(format!("T-{}", num.to_uppercase()));
-        }
-        if lower.starts_with("ticket-") {
-            let num = lower.trim_start_matches("ticket-");
-            return Some(format!("T-{}", num.to_uppercase()));
-        }
-    }
-    None
-}
-
-fn extract_worker_id(text: &str) -> Option<String> {
-    let lower = text.to_lowercase();
-    let parts: Vec<&str> = lower.split_whitespace().collect();
-    for part in parts.iter().skip(1) {
-        if !part.starts_with("t-") && !part.starts_with("ticket-") {
-            return Some(normalize_worker_id(part));
-        }
-    }
-    None
-}
-
-/// Normalize informal worker IDs like "forge1" → "forge-1".
-fn normalize_worker_id(raw: &str) -> String {
-    let lower = raw.to_lowercase();
-    // Insert a hyphen between letters and trailing digits (e.g. forge1 -> forge-1)
-    let mut result = String::new();
-    let mut prev_was_digit = false;
-    let mut prev_was_letter = false;
-    for ch in lower.chars() {
-        let is_digit = ch.is_ascii_digit();
-        let is_letter = ch.is_ascii_alphabetic();
-        if is_digit && prev_was_letter && !prev_was_digit {
-            result.push('-');
-        }
-        result.push(ch);
-        prev_was_digit = is_digit;
-        prev_was_letter = is_letter;
-    }
-    result
-}
-
-/// Extract two worker IDs from a word slice, handling "forge 1" → "forge-1" and skipping filler words.
-fn extract_two_workers(parts: &[&str]) -> (String, String) {
-    if parts.len() < 3 {
-        return (String::new(), String::new());
-    }
-    let (from_worker, next_idx) = read_worker(parts, 1);
-    let (to_worker, _) = read_worker(parts, next_idx);
-    (from_worker, to_worker)
-}
-
-fn read_worker(parts: &[&str], start: usize) -> (String, usize) {
-    if start >= parts.len() {
-        return (String::new(), start);
-    }
-    let token = parts[start].to_lowercase();
-    // Skip filler words
-    if token == "to" || token == "into" || token == "from" {
-        return read_worker(parts, start + 1);
-    }
-    let normalized = normalize_worker_id(parts[start]);
-    if normalized.contains('-') {
-        return (normalized, start + 1);
-    }
-    // Check if next part is a digit that should be joined (e.g. "forge 1")
-    if start + 1 < parts.len() && parts[start + 1].parse::<u64>().is_ok() {
-        let joined = format!("{}{}", parts[start], parts[start + 1]);
-        return (normalize_worker_id(&joined), start + 2);
-    }
-    (normalized, start + 1)
 }
 
 #[async_trait]
@@ -1372,8 +818,11 @@ impl Node for NexusNode {
             warn!("Failed to sync registry: {}", e);
         }
 
-        if let Err(e) = self.process_human_commands(store).await {
-            warn!("Failed to process human commands: {}", e);
+        // Process gateway messages via ReAct loop
+        if let Some(gateway) = self.gateway.as_deref() {
+            if let Err(e) = react_loop::process_gateway_messages(gateway, store, &self.registry_path).await {
+                warn!("Failed to process gateway messages: {}", e);
+            }
         }
 
         let repository = store.get("repository").await.unwrap_or(json!(""));
@@ -1545,45 +994,34 @@ impl Node for NexusNode {
                 if let Some(ticket_id) = &decision.ticket_id {
                     info!(worker_id, ticket_id, "Nexus: Assigning ticket to worker");
 
-                    let workflow_msg = NexusMessage::workflow_started(
-                        ticket_id,
-                        worker_id,
-                        &decision.notes,
-                        decision.issue_url.as_deref(),
-                    );
-                    let assign_msg = NexusMessage::agent_assigned(
-                        worker_id,
-                        ticket_id,
-                        &format!("{} has been assigned to work on {}", worker_id, ticket_id),
-                    );
+                    let workflow_msg = OutboundMessage {
+                        message_type: OutboundMessageType::WorkflowStarted,
+                        target_channel: None,
+                        target_conversation: None,
+                        content: decision.notes.clone(),
+                        ticket_id: Some(ticket_id.clone()),
+                        worker_id: Some(worker_id.clone()),
+                        metadata: serde_json::json!({ "issue_url": decision.issue_url }),
+                    };
+                    let assign_msg = OutboundMessage {
+                        message_type: OutboundMessageType::AgentAssigned,
+                        target_channel: None,
+                        target_conversation: None,
+                        content: format!("{} has been assigned to work on {}", worker_id, ticket_id),
+                        ticket_id: Some(ticket_id.clone()),
+                        worker_id: Some(worker_id.clone()),
+                        metadata: serde_json::Value::Null,
+                    };
 
-                    let wf_ok = if let Some(ref channel) = self.human_channel {
-                        match channel.notify(workflow_msg).await {
-                            Ok(()) => true,
-                            Err(e) => {
-                                warn!(error = %e, "Failed to send workflow notification");
-                                false
-                            }
-                        }
-                    } else {
-                        false
-                    };
-                    let assign_ok = if let Some(ref channel) = self.human_channel {
-                        match channel.notify(assign_msg).await {
-                            Ok(()) => true,
-                            Err(e) => {
-                                warn!(error = %e, "Failed to send assignment notification");
-                                false
-                            }
-                        }
-                    } else {
-                        false
-                    };
+                    let wf_ok = self.gateway.is_some();
+                    let assign_ok = self.gateway.is_some();
+                    self.notify_human(workflow_msg).await;
+                    self.notify_human(assign_msg).await;
 
                     info!(
                         worker_id,
                         ticket_id,
-                        human_channel = ?self.human_channel.is_some(),
+                        gateway = ?self.gateway.is_some(),
                         workflow_notification_sent = wf_ok,
                         assignment_notification_sent = assign_ok,
                         "📢 NEXUS → HUMAN: {} assigned to {} (workflow_sent={}, assignment_sent={})",
@@ -1669,15 +1107,23 @@ impl Node for NexusNode {
                     "CommandGate processing"
                 );
 
-                self.notify_human(NexusMessage::status_update(&format!(
-                    "Command {} for {}",
-                    if decision.action == "approve_command" {
-                        "approved"
-                    } else {
-                        "rejected"
-                    },
-                    worker_id
-                )))
+                self.notify_human(OutboundMessage {
+                    message_type: OutboundMessageType::StatusUpdate,
+                    target_channel: None,
+                    target_conversation: None,
+                    content: format!(
+                        "Command {} for {}",
+                        if decision.action == "approve_command" {
+                            "approved"
+                        } else {
+                            "rejected"
+                        },
+                        worker_id
+                    ),
+                    ticket_id: None,
+                    worker_id: Some(worker_id.clone()),
+                    metadata: serde_json::Value::Null,
+                })
                 .await;
 
                 gate.remove(&worker_id);
