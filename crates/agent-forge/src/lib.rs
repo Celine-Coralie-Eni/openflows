@@ -527,6 +527,10 @@ pub struct ForgePairNode {
     pub workspace_root: PathBuf,
     pub github_token: String,
     pub registry_path: Option<PathBuf>,
+    /// Cached default branch name (e.g., "main" or "master").
+    /// Detected once at construction to avoid repeated detection that can
+    /// race with concurrent git operations and fall back to an incorrect value.
+    pub default_branch: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -541,10 +545,14 @@ struct GithubIssue {
 impl ForgePairNode {
     /// Create a new ForgePairNode with filesystem-based state.
     pub fn new(workspace_root: impl Into<PathBuf>, github_token: impl Into<String>) -> Self {
+        let workspace_root = workspace_root.into();
+        let default_branch =
+            pair_harness::worktree::WorktreeManager::detect_default_branch(&workspace_root);
         Self {
-            workspace_root: workspace_root.into(),
+            workspace_root,
             github_token: github_token.into(),
             registry_path: None,
+            default_branch,
         }
     }
 
@@ -553,10 +561,14 @@ impl ForgePairNode {
         workspace_root: impl Into<PathBuf>,
         registry_path: impl Into<PathBuf>,
     ) -> Self {
+        let workspace_root = workspace_root.into();
+        let default_branch =
+            pair_harness::worktree::WorktreeManager::detect_default_branch(&workspace_root);
         Self {
-            workspace_root: workspace_root.into(),
+            workspace_root,
             github_token: String::new(),
             registry_path: Some(registry_path.into()),
+            default_branch,
         }
     }
 
@@ -797,10 +809,11 @@ impl ForgePairNode {
 
         Self::scan_and_scrub_secrets(&worktree_path)?;
 
-        // Detect the repository's default branch (e.g., "main" or "master")
-        // instead of hardcoding "main" — repos may use "master" as default.
-        let default_branch =
-            WorktreeManager::detect_default_branch(&self.workspace_root);
+        // Use the cached default branch detected at construction time.
+        // Re-detecting here can race with concurrent git operations (fetch, pack-refs
+        // rewrite) and fall back to an incorrect "main" when the actual default is
+        // "master" or another name.
+        let default_branch = &self.default_branch;
 
         let has_changes = StdCommand::new("git")
             .args(["status", "--porcelain"])
@@ -827,17 +840,19 @@ impl ForgePairNode {
                 .context("Failed to git commit")?;
         }
 
-        let has_commits = StdCommand::new("git")
-            .args(["log", &format!("{}..HEAD", default_branch), "--oneline"])
-            .current_dir(&worktree_path)
-            .output()
-            .map(|o| !o.stdout.is_empty())
-            .unwrap_or(false);
+        // Check for commits beyond the default branch.
+        // First try the local branch name, then fall back to the remote-tracking
+        // ref (origin/{default_branch}) which is more reliable after fetches.
+        let has_commits = Self::has_commits_beyond_branch(
+            &worktree_path,
+            default_branch,
+        );
 
         if !has_commits {
             return Err(anyhow!(
-                "No commits on branch {} beyond {}",
+                "No commits on branch {} beyond {} (local or origin/{})",
                 branch_name,
+                default_branch,
                 default_branch
             ));
         }
@@ -1260,6 +1275,70 @@ impl ForgePairNode {
             }
         }
         result
+    }
+
+    /// Check if the worktree has commits beyond a given base branch.
+    ///
+    /// Tries the local branch name first, then falls back to the
+    /// remote-tracking ref (`origin/{branch}`) which is more reliable
+    /// after fetches that may not have updated the local ref.
+    ///
+    /// Unlike a simple `git log {branch}..HEAD` check, this properly
+    /// handles command failures (exit code != 0) instead of treating
+    /// them as "no commits" — a failed `git log` produces empty stdout
+    /// but the error is on stderr, which the old code silently ignored.
+    fn has_commits_beyond_branch(
+        worktree_path: &std::path::Path,
+        default_branch: &str,
+    ) -> bool {
+        use std::process::Command as StdCommand;
+
+        // Try local branch first
+        let local_output = StdCommand::new("git")
+            .args(["log", &format!("{}..HEAD", default_branch), "--oneline"])
+            .current_dir(worktree_path)
+            .output();
+
+        if let Ok(output) = &local_output {
+            if output.status.success() && !output.stdout.is_empty() {
+                return true;
+            }
+        }
+
+        // Fall back to remote-tracking branch — more reliable after fetches
+        let origin_ref = format!("origin/{}", default_branch);
+        let origin_output = StdCommand::new("git")
+            .args(["log", &format!("{}..HEAD", origin_ref), "--oneline"])
+            .current_dir(worktree_path)
+            .output();
+
+        if let Ok(output) = &origin_output {
+            if output.status.success() && !output.stdout.is_empty() {
+                return true;
+            }
+        }
+
+        // Last resort: count commits using rev-list which is more tolerant
+        // of ref resolution issues. Try both local and origin variants.
+        for base in [default_branch, &origin_ref] {
+            let output = StdCommand::new("git")
+                .args(["rev-list", "--count", &format!("{}..HEAD", base)])
+                .current_dir(worktree_path)
+                .output();
+            if let Ok(o) = output {
+                if o.status.success() {
+                    if let Ok(count_str) = String::from_utf8(o.stdout) {
+                        if let Ok(count) = count_str.trim().parse::<u32>() {
+                            if count > 0 {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        false
     }
 
     fn git_add_safe(worktree_path: &std::path::Path) -> Result<()> {
